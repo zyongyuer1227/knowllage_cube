@@ -1,0 +1,11 @@
+import { createPinia } from "pinia";
+import { createApp } from "vue";
+import App from "./App.vue";
+import { router } from "./router";
+import "../../../static/fontawesome/css/all.min.css";
+import "./styles/local-fonts.css";
+
+const app = createApp(App);
+app.use(createPinia());
+app.use(router);
+app.mount("#app");

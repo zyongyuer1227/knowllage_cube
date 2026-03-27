@@ -1,0 +1,16 @@
+{
+  "name": "knowllage-cube",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "start": "node .\\start-dev.js",
+    "dev:backend": "npm --workspace apps/backend run start:dev",
+    "dev:frontend": "npm --workspace apps/frontend run dev",
+    "build": "npm --workspace apps/backend run build && npm --workspace apps/frontend run build",
+    "smoke:backend": "npm --workspace apps/backend run smoke"
+  }
+}
