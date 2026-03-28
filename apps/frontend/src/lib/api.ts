@@ -1,4 +1,5 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api/v1";
+const UNAUTHORIZED_EVENT = "kc:unauthorized";
 
 type RequestOptions = {
   method?: string;
@@ -21,6 +22,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!response.ok) {
     const message = await response.text();
+    if (response.status === 401 && options.token) {
+      window.dispatchEvent(
+        new CustomEvent(UNAUTHORIZED_EVENT, {
+          detail: {
+            path
+          }
+        })
+      );
+      throw new Error("登录已失效，请重新登录后再试");
+    }
     throw new Error(message || `Request failed: ${response.status}`);
   }
 
@@ -39,6 +50,21 @@ export type LoginPayload = {
 };
 
 export type SearchParams = Record<string, string | number | undefined>;
+export type ConversionTaskStatus = {
+  id: string;
+  documentId: string;
+  status: string;
+  retryCount: number;
+  errorMessage: string | null;
+  updatedAt: string;
+};
+
+export type WelcomeDocumentPayload = {
+  title: string;
+  markdownContent: string;
+  previewHtml: string;
+  updatedAt: string;
+};
 
 export const api = {
   login(payload: LoginPayload) {
@@ -71,6 +97,28 @@ export const api = {
   publicFolders() {
     return request<{ total: number; items: Array<Record<string, unknown>> }>("/public/search/folders");
   },
+  getPublicWelcomeDocument() {
+    return request<WelcomeDocumentPayload>("/system/welcome-document");
+  },
+  getAdminWelcomeDocument(token: string) {
+    return request<WelcomeDocumentPayload>("/system/admin/welcome-document", { token });
+  },
+  updateAdminWelcomeDocument(payload: Record<string, unknown>, token: string) {
+    return request<WelcomeDocumentPayload>("/system/admin/welcome-document", {
+      method: "PUT",
+      token,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  },
+  formatTextImport(payload: Record<string, unknown>, token: string) {
+    return request<Record<string, unknown>>("/admin/documents/format-text-import", {
+      method: "POST",
+      token,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  },
   uploadDocument(formData: FormData, token: string) {
     return request<Record<string, unknown>>("/admin/documents/upload", {
       method: "POST",
@@ -84,6 +132,9 @@ export const api = {
       token,
       body: formData
     });
+  },
+  getTask(taskId: string, token: string) {
+    return request<ConversionTaskStatus>(`/admin/documents/tasks/${taskId}`, { token });
   },
   getDocument(id: string, token: string) {
     return request<Record<string, unknown>>(`/admin/documents/${id}`, { token });
@@ -141,3 +192,4 @@ export const api = {
 };
 
 export { API_BASE_URL };
+export { UNAUTHORIZED_EVENT };

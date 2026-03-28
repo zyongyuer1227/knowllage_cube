@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
-import MarkdownRenderer from "../components/MarkdownRenderer.vue";
+import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
 import { useWorkspaceStore, type WorkspaceTreeNode } from "../stores/workspace";
 
@@ -97,7 +97,14 @@ onMounted(async () => {
       </header>
 
       <article class="editor-surface">
-        <MarkdownRenderer v-if="workspace.activeDocument" :source="workspace.activeDocument.markdownSource" />
+        <GovDocPreview
+          v-if="workspace.activeDocument"
+          :source="workspace.activeDocument.markdownSource"
+          :persisted-html="workspace.activeDocument.previewHtml"
+        />
+        <div v-else class="guest-empty-state">
+          <p>请选择左侧文档开始浏览。</p>
+        </div>
       </article>
     </section>
   </section>
@@ -297,9 +304,22 @@ onMounted(async () => {
 }
 
 .editor-surface {
-  padding: 32px 42px 48px;
-  overflow: auto;
+  padding: 20px 24px 24px;
+  overflow: hidden;
   min-height: 0;
+  height: 100%;
+}
+
+.guest-empty-state {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.guest-empty-state p {
+  margin: 0;
 }
 
 @media (max-width: 960px) {
@@ -317,7 +337,7 @@ onMounted(async () => {
   }
 
   .editor-surface {
-    padding: 22px 18px 32px;
+    padding: 14px 12px 16px;
   }
 }
 </style>

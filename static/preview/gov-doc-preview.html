@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Gov Doc Preview</title>
+    <link rel="stylesheet" href="/static/css/cn-gov-doc.css">
+    <style>
+      html {
+        background: #eef1f4;
+      }
+
+      body {
+        box-sizing: border-box;
+        min-height: 100vh;
+        margin: 0;
+        padding: 24px 32px 40px;
+        background: #ffffff;
+      }
+
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="preview-root"></main>
+    <script>
+      window.addEventListener("message", (event) => {
+        if (event.origin !== window.location.origin) return;
+        if (!event.data || event.data.type !== "gov-doc-preview:update") return;
+
+        const root = document.getElementById("preview-root");
+        if (!root) return;
+        root.innerHTML = event.data.html || "";
+      });
+    </script>
+  </body>
+</html>

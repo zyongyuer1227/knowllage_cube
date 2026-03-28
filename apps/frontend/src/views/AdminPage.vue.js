@@ -1,6 +1,6 @@
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
-import MarkdownRenderer from "../components/MarkdownRenderer.vue";
+import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
 import { useAppSettings } from "../lib/app-settings";
 import { api } from "../lib/api";
@@ -16,6 +16,13 @@ const openFolders = ref([]);
 const selectedDocumentIds = ref([]);
 const showSettings = ref(false);
 const settingsBusy = ref(false);
+const formatBusy = ref(false);
+const formatProgress = ref(0);
+const formatStageLabel = ref("");
+const markdownTextarea = ref(null);
+const previewFrame = ref(null);
+const syncSource = ref(null);
+const settingsBackdropPressed = ref(false);
 const settingsForm = ref({
     title: branding.title,
     subtitle: branding.subtitle,
@@ -59,6 +66,46 @@ function toggleDocumentSelection(doc) {
 function clearSelection() {
     selectedDocumentIds.value = [];
 }
+function withScrollSyncLock(source, callback) {
+    syncSource.value = source;
+    callback();
+    requestAnimationFrame(() => {
+        if (syncSource.value === source) {
+            syncSource.value = null;
+        }
+    });
+}
+function getEditorScrollRatio() {
+    const textarea = markdownTextarea.value;
+    if (!textarea)
+        return 0;
+    const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
+    if (maxScrollTop <= 0)
+        return 0;
+    return textarea.scrollTop / maxScrollTop;
+}
+function setEditorScrollRatio(value) {
+    const textarea = markdownTextarea.value;
+    if (!textarea)
+        return;
+    const ratio = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+    const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
+    textarea.scrollTop = maxScrollTop > 0 ? maxScrollTop * ratio : 0;
+}
+function syncPreviewFromEditor() {
+    if (syncSource.value === "preview")
+        return;
+    withScrollSyncLock("editor", () => {
+        previewFrame.value?.setScrollRatio(getEditorScrollRatio());
+    });
+}
+function syncEditorFromPreview(ratio) {
+    if (syncSource.value === "editor")
+        return;
+    withScrollSyncLock("preview", () => {
+        setEditorScrollRatio(ratio);
+    });
+}
 async function login() {
     loginError.value = "";
     try {
@@ -80,6 +127,35 @@ async function saveCurrentDocument() {
         statusMessage.value = error instanceof Error ? error.message : "保存失败";
     }
 }
+async function normalizeMarkdown() {
+    if (!auth.token)
+        return;
+    formatBusy.value = true;
+    formatProgress.value = 8;
+    formatStageLabel.value = "大模型处理中";
+    statusMessage.value = "";
+    try {
+        await workspace.formatEditorTextWithAi(auth.token, (snapshot) => {
+            formatProgress.value = snapshot.percent;
+            formatStageLabel.value = snapshot.label;
+        });
+        formatProgress.value = 100;
+        formatStageLabel.value = "导入完成";
+        statusMessage.value = "已调用大模型完成格式化并导入新文档";
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "大模型格式化失败";
+    }
+    finally {
+        formatBusy.value = false;
+        window.setTimeout(() => {
+            if (!formatBusy.value) {
+                formatProgress.value = 0;
+                formatStageLabel.value = "";
+            }
+        }, 1000);
+    }
+}
 function openSettings() {
     settingsForm.value = {
         title: branding.title,
@@ -91,6 +167,7 @@ function openSettings() {
 }
 function closeSettings() {
     showSettings.value = false;
+    settingsBackdropPressed.value = false;
 }
 async function saveSettings() {
     settingsBusy.value = true;
@@ -102,6 +179,17 @@ async function saveSettings() {
     finally {
         settingsBusy.value = false;
     }
+}
+function handleSettingsBackdropPointerDown() {
+    settingsBackdropPressed.value = true;
+}
+function handleSettingsBackdropPointerUp() {
+    if (settingsBackdropPressed.value) {
+        closeSettings();
+    }
+}
+function cancelSettingsBackdropClose() {
+    settingsBackdropPressed.value = false;
 }
 function restoreSettings() {
     resetBranding();
@@ -182,6 +270,11 @@ watch(treeKeys, (keys) => {
 watch(() => workspace.docs.map((doc) => doc.id), (ids) => {
     selectedDocumentIds.value = selectedDocumentIds.value.filter((id) => ids.includes(id));
 }, { immediate: true });
+watch(() => workspace.activeId, async () => {
+    await nextTick();
+    setEditorScrollRatio(0);
+    previewFrame.value?.setScrollRatio(0);
+});
 onMounted(async () => {
     workspace.ensureInitialized();
     if (auth.token) {
@@ -482,7 +575,10 @@ else {
             ...{ class: "editor-panel" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-title" },
+            ...{ class: "panel-title panel-title-row" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "panel-title-main" },
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
@@ -495,12 +591,33 @@ else {
             fixedWidth: true,
         }, ...__VLS_functionalComponentArgsRest(__VLS_27));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.normalizeMarkdown) },
+            type: "button",
+            ...{ class: "subtle-btn convert-btn" },
+            disabled: (__VLS_ctx.formatBusy),
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_30 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "wand-magic-sparkles",
+            fixedWidth: true,
+        }));
+        const __VLS_31 = __VLS_30({
+            name: "wand-magic-sparkles",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_30));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.formatBusy ? "大模型处理中..." : "一键转换md格式");
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "editor-field" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+            ...{ onScroll: (__VLS_ctx.syncPreviewFromEditor) },
+            ref: "markdownTextarea",
             value: (__VLS_ctx.workspace.editorMarkdown),
         });
+        /** @type {typeof __VLS_ctx.markdownTextarea} */ ;
         __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
             ...{ class: "preview-panel" },
         });
@@ -509,29 +626,61 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_30 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_33 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "eye",
             fixedWidth: true,
         }));
-        const __VLS_31 = __VLS_30({
+        const __VLS_34 = __VLS_33({
             name: "eye",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_30));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_33));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "preview-surface" },
         });
-        /** @type {[typeof MarkdownRenderer, ]} */ ;
+        /** @type {[typeof GovDocPreview, ]} */ ;
         // @ts-ignore
-        const __VLS_33 = __VLS_asFunctionalComponent(MarkdownRenderer, new MarkdownRenderer({
+        const __VLS_36 = __VLS_asFunctionalComponent(GovDocPreview, new GovDocPreview({
+            ...{ 'onScrollRatio': {} },
+            ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
         }));
-        const __VLS_34 = __VLS_33({
+        const __VLS_37 = __VLS_36({
+            ...{ 'onScrollRatio': {} },
+            ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_33));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_36));
+        let __VLS_39;
+        let __VLS_40;
+        let __VLS_41;
+        const __VLS_42 = {
+            onScrollRatio: (__VLS_ctx.syncEditorFromPreview)
+        };
+        /** @type {typeof __VLS_ctx.previewFrame} */ ;
+        var __VLS_43 = {};
+        var __VLS_38;
         __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
             ...{ class: "editor-footer" },
         });
+        if (__VLS_ctx.formatProgress > 0) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "format-progress" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "format-progress-meta" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.formatStageLabel || "处理中");
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (__VLS_ctx.formatProgress);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "format-progress-track" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "format-progress-fill" },
+                ...{ style: ({ width: `${__VLS_ctx.formatProgress}%` }) },
+            });
+        }
         if (__VLS_ctx.statusMessage) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
                 ...{ class: "status" },
@@ -548,14 +697,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_36 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_45 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "sliders",
             fixedWidth: true,
         }));
-        const __VLS_37 = __VLS_36({
+        const __VLS_46 = __VLS_45({
             name: "sliders",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_36));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_45));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.saveCurrentDocument) },
@@ -564,14 +713,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_39 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_48 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "floppy-disk",
             fixedWidth: true,
         }));
-        const __VLS_40 = __VLS_39({
+        const __VLS_49 = __VLS_48({
             name: "floppy-disk",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_39));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.workspace.saving ? "保存中..." : "保存源码");
     }
@@ -584,10 +733,13 @@ else {
 }
 if (__VLS_ctx.showSettings) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ onClick: (__VLS_ctx.closeSettings) },
+        ...{ onMousedown: (__VLS_ctx.handleSettingsBackdropPointerDown) },
+        ...{ onMouseup: (__VLS_ctx.handleSettingsBackdropPointerUp) },
         ...{ class: "settings-backdrop" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ onMousedown: (__VLS_ctx.cancelSettingsBackdropClose) },
+        ...{ onMouseup: (__VLS_ctx.cancelSettingsBackdropClose) },
         ...{ class: "settings-dialog" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
@@ -605,14 +757,14 @@ if (__VLS_ctx.showSettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_42 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "xmark",
         fixedWidth: true,
     }));
-    const __VLS_43 = __VLS_42({
+    const __VLS_52 = __VLS_51({
         name: "xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_51));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "settings-form" },
     });
@@ -665,14 +817,14 @@ if (__VLS_ctx.showSettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_45 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "floppy-disk",
         fixedWidth: true,
     }));
-    const __VLS_46 = __VLS_45({
+    const __VLS_55 = __VLS_54({
         name: "floppy-disk",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_45));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_54));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.settingsBusy ? "保存中..." : "保存设置");
 }
@@ -705,11 +857,19 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['editor-split']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-title-row']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-title-main']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['convert-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-surface']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-footer']} */ ;
+/** @type {__VLS_StyleScopedClasses['format-progress']} */ ;
+/** @type {__VLS_StyleScopedClasses['format-progress-meta']} */ ;
+/** @type {__VLS_StyleScopedClasses['format-progress-track']} */ ;
+/** @type {__VLS_StyleScopedClasses['format-progress-fill']} */ ;
 /** @type {__VLS_StyleScopedClasses['status']} */ ;
 /** @type {__VLS_StyleScopedClasses['action-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
@@ -729,12 +889,14 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+// @ts-ignore
+var __VLS_44 = __VLS_43;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             FaIcon: FaIcon,
-            MarkdownRenderer: MarkdownRenderer,
+            GovDocPreview: GovDocPreview,
             WorkspaceTree: WorkspaceTree,
             auth: auth,
             workspace: workspace,
@@ -745,17 +907,28 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectedDocumentIds: selectedDocumentIds,
             showSettings: showSettings,
             settingsBusy: settingsBusy,
+            formatBusy: formatBusy,
+            formatProgress: formatProgress,
+            formatStageLabel: formatStageLabel,
+            markdownTextarea: markdownTextarea,
+            previewFrame: previewFrame,
             settingsForm: settingsForm,
             loginForm: loginForm,
             toggleFolder: toggleFolder,
             selectedCount: selectedCount,
             toggleDocumentSelection: toggleDocumentSelection,
             clearSelection: clearSelection,
+            syncPreviewFromEditor: syncPreviewFromEditor,
+            syncEditorFromPreview: syncEditorFromPreview,
             login: login,
             saveCurrentDocument: saveCurrentDocument,
+            normalizeMarkdown: normalizeMarkdown,
             openSettings: openSettings,
             closeSettings: closeSettings,
             saveSettings: saveSettings,
+            handleSettingsBackdropPointerDown: handleSettingsBackdropPointerDown,
+            handleSettingsBackdropPointerUp: handleSettingsBackdropPointerUp,
+            cancelSettingsBackdropClose: cancelSettingsBackdropClose,
             restoreSettings: restoreSettings,
             handleFaviconChange: handleFaviconChange,
             deleteDocument: deleteDocument,

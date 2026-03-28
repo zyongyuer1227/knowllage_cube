@@ -17,6 +17,7 @@ import { FileInterceptor, FilesInterceptor } from "@nestjs/platform-express";
 import { AuthRequest } from "../../common/auth/auth-request.interface";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { CreateFolderDto } from "./dto/create-folder.dto";
+import { FormatTextImportDto } from "./dto/format-text-import.dto";
 import { RollbackVersionDto } from "./dto/rollback-version.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { UpdateDocumentContentDto } from "./dto/update-document-content.dto";
@@ -72,6 +73,11 @@ export class DocumentController {
       throw new BadRequestException("Missing files");
     }
     return this.documentService.uploadBatch(files, body, req.user?.sub);
+  }
+
+  @Post("format-text-import")
+  formatTextImport(@Body() body: FormatTextImportDto, @Req() req: AuthRequest) {
+    return this.documentService.formatTextAndImport(body, req.user?.sub);
   }
 
   @Get("tasks/:taskId")

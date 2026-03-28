@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
+import { promises as fs } from "fs";
+import { join } from "path";
 import { QueryFailedError, Repository } from "typeorm";
 import { DocumentContentEntity } from "../document/entities/document-content.entity";
 import { DocumentEntity } from "../document/entities/document.entity";
@@ -8,6 +10,8 @@ import { SearchQueryDto } from "./dto/search-query.dto";
 
 @Injectable()
 export class SearchService {
+  private readonly documentsRoot = join(process.cwd(), "storage", "documents");
+
   constructor(
     @InjectRepository(DocumentEntity)
     private readonly documentRepository: Repository<DocumentEntity>,
@@ -22,14 +26,21 @@ export class SearchService {
     qb.where("1 = 1");
 
     const keyword = (query.q ?? "").trim();
+    const hasKeyword = keyword.length > 0;
+    qb.leftJoin(
+      "document_contents",
+      "dc",
+      "dc.document_id = d.id AND dc.created_at = (SELECT MAX(dc2.created_at) FROM document_contents dc2 WHERE dc2.document_id = d.id)"
+    );
+
     if (keyword) {
-      qb.leftJoin(
-        "document_contents",
-        "dc",
-        "dc.document_id = d.id AND dc.created_at = (SELECT MAX(dc2.created_at) FROM document_contents dc2 WHERE dc2.document_id = d.id)"
-      );
       qb.andWhere(
-        "(d.title ILIKE :kw OR COALESCE(dc.raw_text, '') ILIKE :kw OR COALESCE(dc.markdown_content, '') ILIKE :kw)",
+        "(" +
+          "d.title ILIKE :kw " +
+          "OR COALESCE(d.archive_path, '') ILIKE :kw " +
+          "OR COALESCE(dc.raw_text, '') ILIKE :kw " +
+          "OR COALESCE(dc.markdown_content, '') ILIKE :kw" +
+        ")",
         { kw: `%${keyword}%` }
       );
     }
@@ -38,31 +49,34 @@ export class SearchService {
     countQb.orderBy();
     const total = await countQb.getCount();
 
-    let rows: DocumentEntity[] = [];
     if (query.sortBy === "relevance") {
-      const candidates = await qb.clone().orderBy("d.updatedAt", "DESC").take(2000).getMany();
-      const ranked = candidates
-        .map((row) => ({
-          row,
-          score: this.calcRelevanceScore(row, keyword)
-        }))
-        .sort((a, b) => {
-          if (b.score !== a.score) {
-            return b.score - a.score;
-          }
-          return b.row.updatedAt.getTime() - a.row.updatedAt.getTime();
-        })
-        .map((item) => item.row);
-      rows = ranked.slice((query.page - 1) * query.pageSize, query.page * query.pageSize);
+      if (hasKeyword) {
+        qb.addSelect(
+          [
+            "CASE WHEN d.title ILIKE :prefixKw THEN 120 ELSE 0 END",
+            "CASE WHEN d.title ILIKE :kw THEN 80 ELSE 0 END",
+            "CASE WHEN COALESCE(d.archive_path, '') ILIKE :kw THEN 30 ELSE 0 END",
+            "CASE WHEN COALESCE(dc.raw_text, '') ILIKE :kw THEN 20 ELSE 0 END",
+            "CASE WHEN COALESCE(dc.markdown_content, '') ILIKE :kw THEN 10 ELSE 0 END"
+          ].join(" + "),
+          "relevance_score"
+        );
+        qb.setParameter("prefixKw", `${keyword}%`);
+        qb.orderBy("relevance_score", "DESC").addOrderBy("d.updatedAt", "DESC");
+      } else {
+        qb.orderBy("d.updatedAt", query.order.toUpperCase() as "ASC" | "DESC");
+      }
     } else {
       if (query.sortBy === "createdAt") {
         qb.orderBy("d.createdAt", query.order.toUpperCase() as "ASC" | "DESC");
       } else {
         qb.orderBy("d.updatedAt", query.order.toUpperCase() as "ASC" | "DESC");
       }
-      qb.skip((query.page - 1) * query.pageSize).take(query.pageSize);
-      rows = await qb.getMany();
     }
+
+    qb.skip((query.page - 1) * query.pageSize).take(query.pageSize);
+    const rows = await qb.getMany();
+
     const response = {
       query: keyword,
       page: query.page,
@@ -94,7 +108,9 @@ export class SearchService {
       id: document.id,
       title: document.title,
       archivePath: document.archivePath,
-      markdownContent: content.markdownContent
+      markdownContent: content.markdownContent,
+      rawText: await this.readTextFile(join(this.documentsRoot, id, "content.txt")),
+      previewHtml: await this.readTextFile(join(this.documentsRoot, id, "preview.html"))
     };
   }
 
@@ -159,23 +175,18 @@ export class SearchService {
       }))
     };
   }
-
-  private calcRelevanceScore(row: DocumentEntity, keyword: string): number {
-    if (!keyword) {
-      return 0;
-    }
-    let score = 0;
-    const kw = keyword.toLowerCase();
-    if (row.title?.toLowerCase().includes(kw)) {
-      score += 5;
-    }
-    return score;
-  }
-
   private isMissingFolderTableError(error: unknown) {
     if (!(error instanceof QueryFailedError)) {
       return false;
     }
     return String(error.message).includes('relation "document_folders" does not exist');
+  }
+
+  private async readTextFile(path: string) {
+    try {
+      return await fs.readFile(path, "utf-8");
+    } catch {
+      return null;
+    }
   }
 }

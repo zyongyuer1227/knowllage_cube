@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useRouter } from "vue-router";
 import { useRoute } from "vue-router";
 import FaIcon from "./components/FaIcon.vue";
 import { useAppSettings, type ThemeMode } from "./lib/app-settings";
@@ -9,6 +10,7 @@ import { useWorkspaceStore } from "./stores/workspace";
 const { branding, effectiveTheme, setTheme, themeMode } = useAppSettings();
 const auth = useAuthStore();
 const route = useRoute();
+const router = useRouter();
 const workspace = useWorkspaceStore();
 const importInput = ref<HTMLInputElement | null>(null);
 const actionMode = ref<"" | "document" | "folder">("");
@@ -16,12 +18,66 @@ const actionInput = ref("");
 const actionStatus = ref("");
 const actionError = ref("");
 const actionBusy = ref(false);
+const actionProgress = ref(0);
+const actionProgressLabel = ref("");
+let progressTimer: number | null = null;
 
 const showAdminActions = computed(() => route.path === "/admin" && auth.isLoggedIn);
-const bannerVisible = computed(() => !!actionError.value || !!actionStatus.value);
+const bannerVisible = computed(() => actionBusy.value || !!actionError.value || !!actionStatus.value);
 const actionPlaceholder = computed(() =>
   actionMode.value === "folder" ? "输入完整文件夹路径，如 法律法规/国家/行政法规" : "输入新文档标题"
 );
+const homeLinkTarget = computed(() => (auth.isLoggedIn ? "/admin" : "/"));
+const homeLinkLabel = computed(() => (auth.isLoggedIn ? "管理员" : "游客"));
+
+function stopProgress() {
+  if (progressTimer !== null) {
+    window.clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
+function startProgress(label: string) {
+  stopProgress();
+  actionProgress.value = 8;
+  actionProgressLabel.value = label;
+  progressTimer = window.setInterval(() => {
+    if (actionProgress.value < 72) {
+      actionProgress.value += 6;
+      return;
+    }
+    if (actionProgress.value < 90) {
+      actionProgress.value += 1;
+    }
+  }, 700);
+}
+
+function finishProgress(label: string) {
+  actionProgressLabel.value = label;
+  actionProgress.value = 100;
+  stopProgress();
+}
+
+function setProgress(value: number, label: string) {
+  stopProgress();
+  actionProgress.value = Math.max(0, Math.min(100, value));
+  actionProgressLabel.value = label;
+}
+
+function resetProgress() {
+  stopProgress();
+  actionProgress.value = 0;
+  actionProgressLabel.value = "";
+}
+
+function handleLogout() {
+  auth.logout();
+  actionMode.value = "";
+  actionInput.value = "";
+  actionStatus.value = "";
+  actionError.value = "";
+  router.push("/");
+}
 
 function openAction(mode: "document" | "folder") {
   actionMode.value = mode;
@@ -44,12 +100,40 @@ async function handleImport(event: Event) {
   actionBusy.value = true;
   actionError.value = "";
   actionStatus.value = "";
+  const hasWord = files.some((file) => /\.(docx?|DOCX?)$/.test(file.name));
+  startProgress(hasWord ? "正在上传文档..." : "正在上传文档...");
   try {
-    await workspace.importFiles(auth.token, files);
+    const result = await workspace.importFiles(auth.token, files);
+    const tasks = result?.tasks ?? [];
+
+    if (tasks.length > 0) {
+      setProgress(
+        12,
+        hasWord ? `上传完成，正在后台转换：${tasks[0]?.fileName ?? "文档"}` : "上传完成，正在处理文档..."
+      );
+      const finalResult = await workspace.waitForImportTasks(auth.token, tasks, (snapshot) => {
+        const ratio = snapshot.total === 0 ? 0 : (snapshot.completed + snapshot.failed) / snapshot.total;
+        const percent = Math.round(12 + ratio * 88);
+        const label =
+          snapshot.completed + snapshot.failed >= snapshot.total
+            ? "后台转换已完成"
+            : `正在转换（${snapshot.completed + snapshot.failed}/${snapshot.total}）：${snapshot.activeFileName || "文档"}`;
+        setProgress(percent, label);
+      });
+
+      if (finalResult.failed.length > 0) {
+        const firstFailed = finalResult.failed[0];
+        throw new Error(firstFailed.errorMessage || `部分文件转换失败：${firstFailed.fileName}`);
+      }
+    }
+
+    finishProgress("导入完成");
     actionStatus.value = `已导入 ${files.length} 个文件`;
   } catch (error) {
+    resetProgress();
     actionError.value = error instanceof Error ? error.message : "导入失败";
   } finally {
+    resetProgress();
     actionBusy.value = false;
     input.value = "";
   }
@@ -66,19 +150,24 @@ async function submitAction() {
   actionBusy.value = true;
   actionError.value = "";
   actionStatus.value = "";
+  startProgress(actionMode.value === "document" ? "正在创建文档..." : "正在创建文件夹...");
   try {
     if (actionMode.value === "document") {
       await workspace.createDocument(auth.token, value);
       closeAction();
+      finishProgress("新文档已创建");
       actionStatus.value = "新文档已创建";
     } else {
       await workspace.createFolder(auth.token, value);
       closeAction();
+      finishProgress("新文件夹已创建");
       actionStatus.value = "新文件夹已创建";
     }
   } catch (error) {
+    resetProgress();
     actionError.value = error instanceof Error ? error.message : "操作失败";
   } finally {
+    resetProgress();
     actionBusy.value = false;
   }
 }
@@ -144,11 +233,15 @@ async function submitAction() {
         </div>
 
         <nav>
-          <RouterLink to="/">
+          <RouterLink :to="homeLinkTarget">
             <FaIcon name="desktop" fixed-width />
-            <span>游客</span>
+            <span>{{ homeLinkLabel }}</span>
           </RouterLink>
-          <RouterLink to="/admin">
+          <button v-if="auth.isLoggedIn" type="button" class="nav-link-btn" @click="handleLogout">
+            <FaIcon name="right-from-bracket" fixed-width />
+            <span>退出</span>
+          </button>
+          <RouterLink v-else to="/admin">
             <FaIcon name="gear" fixed-width />
             <span>登录</span>
           </RouterLink>
@@ -156,9 +249,14 @@ async function submitAction() {
       </div>
     </header>
 
-    <div v-if="actionError || actionStatus" class="action-banner" :class="{ error: !!actionError }">
-      <FaIcon :name="actionError ? 'triangle-exclamation' : 'circle-check'" fixed-width />
-      <span>{{ actionError || actionStatus }}</span>
+    <div v-if="actionBusy || actionError || actionStatus" class="action-banner" :class="{ error: !!actionError, busy: actionBusy }">
+      <div class="banner-main">
+        <FaIcon :name="actionError ? 'triangle-exclamation' : actionBusy ? 'spinner' : 'circle-check'" fixed-width />
+        <span>{{ actionError || actionStatus || actionProgressLabel }}</span>
+      </div>
+      <div v-if="actionBusy" class="progress-track" aria-hidden="true">
+        <div class="progress-fill" :style="{ width: `${actionProgress}%` }"></div>
+      </div>
     </div>
 
     <main class="app-content">
@@ -398,9 +496,9 @@ nav {
   gap: 8px;
 }
 
-a {
+a,
+.nav-link-btn {
   color: var(--text-secondary);
-  text-decoration: none;
   font-size: 13px;
   min-height: 32px;
   padding: 4px 10px;
@@ -412,7 +510,12 @@ a {
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-a:hover {
+a {
+  text-decoration: none;
+}
+
+a:hover,
+.nav-link-btn:hover {
   background: var(--hover-bg);
 }
 
@@ -422,24 +525,55 @@ a.router-link-active {
   color: var(--text-primary);
 }
 
+.nav-link-btn {
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
 .hidden-input {
   display: none;
 }
 
 .action-banner {
   min-height: 32px;
-  padding: 0 16px;
+  padding: 6px 16px 8px;
   border-bottom: 1px solid var(--border-color);
   background: var(--panel-header-bg);
   color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: grid;
+  gap: 6px;
   font-size: 12px;
 }
 
 .action-banner.error {
   color: #d06a6a;
+}
+
+.banner-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.action-banner.busy :deep(.fa-spinner) {
+  animation: spin 1s linear infinite;
+}
+
+.progress-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--button-border) 55%, transparent);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5d78ff, #78b2ff);
+  transition: width 240ms ease;
 }
 
 .app-footer {
@@ -485,6 +619,16 @@ a.router-link-active {
   .inline-action input {
     width: min(100%, 320px);
     flex: 1;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>

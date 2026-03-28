@@ -1,12 +1,13 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { basename, join, resolve } from "path";
 import { promisify } from "util";
 import { QueryFailedError, Repository } from "typeorm";
 import { UpdateDocumentDto } from "./dto/update-document.dto";
+import { FormatTextImportDto } from "./dto/format-text-import.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { UpdateDocumentContentDto } from "./dto/update-document-content.dto";
 import { AuditService } from "../audit/audit.service";
@@ -15,12 +16,17 @@ import { DocumentFolderEntity } from "./entities/document-folder.entity";
 import { DocumentConversionTaskEntity } from "./entities/document-conversion-task.entity";
 import { DocumentEntity } from "./entities/document.entity";
 import { DocumentVersionEntity } from "./entities/document-version.entity";
+import { renderPersistedPreviewHtml } from "./document-preview.util";
 
 @Injectable()
-export class DocumentService {
+export class DocumentService implements OnModuleInit {
   private readonly execFileAsync = promisify(execFile);
   private readonly supportedExt = new Set([".doc", ".docx", ".txt", ".pdf", ".html", ".htm"]);
-  private readonly uploadRoot = join(process.cwd(), "storage", "uploads");
+  private readonly documentsRoot = join(process.cwd(), "storage", "documents");
+  private readonly repoRoot = resolve(__dirname, "../../../../../");
+  private readonly wordToMdScriptPath = join(this.repoRoot, "scripts", "word2md_converter.py");
+  private readonly textToMdScriptPath = join(this.repoRoot, "scripts", "text2md_formatter.py");
+  private readonly wordToMdSamplePath = join(this.repoRoot, "scripts", "sample.md");
 
   constructor(
     @InjectRepository(DocumentEntity)
@@ -35,6 +41,16 @@ export class DocumentService {
     private readonly versionRepository: Repository<DocumentVersionEntity>,
     private readonly auditService: AuditService
   ) {}
+
+  async onModuleInit() {
+    const tasks = await this.taskRepository.find({
+      where: [{ status: "pending" }, { status: "processing" }],
+      order: { updatedAt: "ASC" }
+    });
+    tasks.forEach((task) => {
+      this.startTaskProcessing(task.id);
+    });
+  }
 
   bootstrapInfo() {
     return {
@@ -103,6 +119,7 @@ export class DocumentService {
     const normalizedTitle = this.normalizeMultipartText(body.title);
     const normalizedArchivePath = body.archivePath ? this.normalizeMultipartText(body.archivePath) : null;
     const normalizedOriginalName = this.normalizeMultipartText(file.originalname);
+    await this.ensureTitleAvailable(normalizedTitle);
     const ext = this.normalizeExt(normalizedOriginalName);
     if (!this.supportedExt.has(ext)) {
       throw new BadRequestException(`Unsupported file type: ${ext}`);
@@ -134,19 +151,13 @@ export class DocumentService {
       taskId: task.id
     });
 
-    await this.processTask(task.id);
+    this.startTaskProcessing(task.id);
 
-    const latestTask = await this.taskRepository.findOne({ where: { id: task.id } });
-    if (latestTask?.status !== "success") {
-      const reason = latestTask?.errorMessage ?? "Document conversion failed";
-      await this.cleanupFailedUpload(document.id, filePath);
-      throw new BadRequestException(reason);
-    }
     return {
       documentId: document.id,
       taskId: task.id,
-      taskStatus: latestTask?.status ?? "unknown",
-      errorMessage: latestTask?.errorMessage ?? null
+      taskStatus: task.status,
+      errorMessage: task.errorMessage
     };
   }
 
@@ -181,6 +192,68 @@ export class DocumentService {
     };
   }
 
+  async formatTextAndImport(body: FormatTextImportDto, operatorId?: number) {
+    const normalizedTitle = this.normalizeMultipartText(body.title).trim();
+    const normalizedArchivePath = body.archivePath ? this.normalizeMultipartText(body.archivePath) : null;
+    const rawText = body.text?.trim();
+    const documentId = body.documentId?.trim() || "";
+    if (!normalizedTitle) {
+      throw new BadRequestException("Title is required");
+    }
+    if (!rawText) {
+      throw new BadRequestException("Text content is empty");
+    }
+    const markdownLikeText = await this.runTextToMarkdownScript(rawText);
+    const normalizedMarkdown = this.ensureMarkdownTitle(normalizedTitle, markdownLikeText);
+
+    if (documentId) {
+      const document = await this.documentRepository.findOne({ where: { id: documentId } });
+      if (!document) {
+        throw new NotFoundException("Document not found");
+      }
+      await this.ensureTitleAvailable(normalizedTitle, documentId);
+      document.title = normalizedTitle;
+      document.archivePath = normalizedArchivePath ? this.normalizeFolderPath(normalizedArchivePath) : null;
+      await this.documentRepository.save(document);
+
+      await this.contentRepository.delete({ documentId });
+      await this.contentRepository.save(
+        this.contentRepository.create({
+          documentId,
+          rawText: this.extractRawTextFromMarkdown(normalizedMarkdown),
+          markdownContent: normalizedMarkdown
+        })
+      );
+
+      const version = await this.createVersionSnapshot(documentId, operatorId, "Formatted with AI from editor text");
+      await this.syncDocumentAssets(documentId);
+      await this.logDocOperation(operatorId, "document.ai_format_update", documentId, {
+        currentVersion: version.versionNo
+      });
+      return {
+        documentId,
+        updated: true,
+        currentVersion: version.versionNo
+      };
+    }
+
+    await this.ensureTitleAvailable(normalizedTitle);
+    const fileBuffer = Buffer.from(normalizedMarkdown, "utf-8");
+
+    return this.uploadAndConvert(
+      {
+        originalname: `${normalizedTitle}.txt`,
+        buffer: fileBuffer,
+        size: fileBuffer.byteLength
+      },
+      {
+        title: normalizedTitle,
+        archivePath: normalizedArchivePath ?? undefined
+      },
+      operatorId
+    );
+  }
+
   async getTask(taskId: string) {
     const task = await this.taskRepository.findOne({ where: { id: taskId } });
     if (!task) {
@@ -212,8 +285,14 @@ export class DocumentService {
     task.status = "pending";
     task.errorMessage = null;
     await this.taskRepository.save(task);
-    await this.processTask(task.id);
+    this.startTaskProcessing(task.id);
     return this.getTask(task.id);
+  }
+
+  private startTaskProcessing(taskId: string) {
+    setImmediate(() => {
+      void this.processTask(taskId);
+    });
   }
 
   async getDocument(id: string) {
@@ -227,7 +306,10 @@ export class DocumentService {
     });
     return {
       ...document,
-      markdownContent: content?.markdownContent ?? null
+      markdownContent: content?.markdownContent ?? null,
+      rawText: await this.readTextFile(this.getDocumentAssetPaths(id).rawTextPath),
+      previewHtml: await this.readTextFile(this.getDocumentAssetPaths(id).previewHtmlPath),
+      persistedAssets: await this.getPersistedAssetDescriptor(id)
     };
   }
 
@@ -241,10 +323,12 @@ export class DocumentService {
       document.archivePath = body.archivePath || null;
     }
     if (body.title !== undefined) {
+      await this.ensureTitleAvailable(body.title, id);
       document.title = body.title;
     }
     await this.documentRepository.save(document);
     await this.tryCreateVersionSnapshot(id, operatorId, "Metadata update");
+    await this.syncDocumentAssets(id);
     await this.logDocOperation(operatorId, "document.update", id, {
       title: document.title
     });
@@ -262,6 +346,7 @@ export class DocumentService {
         await fs.rm(task.filePath, { force: true });
       }
     }
+    await fs.rm(this.getDocumentStorageDir(id), { recursive: true, force: true });
     await this.versionRepository.delete({ documentId: id });
     await this.contentRepository.delete({ documentId: id });
     await this.taskRepository.delete({ documentId: id });
@@ -289,6 +374,7 @@ export class DocumentService {
     );
 
     const version = await this.createVersionSnapshot(id, operatorId, body.changeNote ?? "Content update");
+    await this.syncDocumentAssets(id);
     await this.logDocOperation(operatorId, "document.update_content", id, {
       currentVersion: version.versionNo,
       changeNote: body.changeNote ?? null
@@ -364,6 +450,7 @@ export class DocumentService {
 
     const note = changeNote ?? `Rollback to version ${versionNo}`;
     const newVersion = await this.createVersionSnapshot(id, operatorId, note);
+    await this.syncDocumentAssets(id);
     await this.logDocOperation(operatorId, "document.rollback", id, {
       rollbackFromVersion: versionNo,
       currentVersion: newVersion.versionNo
@@ -386,6 +473,10 @@ export class DocumentService {
 
     try {
       const converted = await this.convertToMarkdown(task.sourceFilename, task.sourceExt, task.filePath);
+      const markdownTitle = this.extractMarkdownTitle(converted.markdown);
+      if (markdownTitle) {
+        await this.documentRepository.update({ id: task.documentId }, { title: markdownTitle });
+      }
       await this.contentRepository.delete({ documentId: task.documentId });
       await this.contentRepository.save(
         this.contentRepository.create({
@@ -395,6 +486,7 @@ export class DocumentService {
         })
       );
       await this.createVersionSnapshot(task.documentId, undefined, `Converted from ${task.sourceExt}`);
+      await this.syncDocumentAssets(task.documentId);
       task.status = "success";
       task.errorMessage = null;
       await this.taskRepository.save(task);
@@ -451,11 +543,10 @@ export class DocumentService {
   }
 
   private async persistFile(documentId: string, originalName: string, buffer: Buffer): Promise<string> {
-    await fs.mkdir(this.uploadRoot, { recursive: true });
-    const timestamp = Date.now();
     const safeName = originalName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
-    const fileName = `${documentId}_${timestamp}_${safeName}`;
-    const filePath = join(this.uploadRoot, fileName);
+    const sourceDir = this.getDocumentAssetPaths(documentId).sourceDir;
+    await fs.mkdir(sourceDir, { recursive: true });
+    const filePath = join(sourceDir, safeName);
     await fs.writeFile(filePath, buffer);
     return filePath;
   }
@@ -475,6 +566,18 @@ export class DocumentService {
 
   private async convertOfficeToMarkdown(title: string, filePath: string, ext: string) {
     const attempts: string[] = [];
+
+    if (ext === ".docx") {
+      try {
+        const markdown = await this.runWordToMarkdownScript(filePath);
+        return {
+          rawText: this.extractRawTextFromMarkdown(markdown),
+          markdown: this.ensureMarkdownTitle(title, markdown)
+        };
+      } catch (error) {
+        attempts.push(`python word2md failed: ${this.errMsg(error)}`);
+      }
+    }
 
     try {
       const markdown = await this.runPandocToMarkdown(filePath);
@@ -546,6 +649,128 @@ export class DocumentService {
     return markdown;
   }
 
+  private async runWordToMarkdownScript(inputPath: string): Promise<string> {
+    await fs.access(this.wordToMdScriptPath);
+    await fs.access(this.wordToMdSamplePath);
+
+    const outDir = await fs.mkdtemp(join(tmpdir(), "kc-word2md-"));
+    const outputPath = join(outDir, `${this.baseName(inputPath)}.txt`);
+    const commandCandidates =
+      process.platform === "win32"
+        ? [
+            { command: "python", args: [this.wordToMdScriptPath] },
+            { command: "py", args: ["-3", this.wordToMdScriptPath] },
+            { command: "python3", args: [this.wordToMdScriptPath] }
+          ]
+        : [
+            { command: "python3", args: [this.wordToMdScriptPath] },
+            { command: "python", args: [this.wordToMdScriptPath] }
+          ];
+
+    const baseArgs = [
+      "--sample",
+      this.wordToMdSamplePath,
+      "--input",
+      inputPath,
+      "--output",
+      outputPath
+    ];
+    const errors: string[] = [];
+
+    try {
+      for (const candidate of commandCandidates) {
+        try {
+          await this.execFileAsync(candidate.command, [...candidate.args, ...baseArgs], {
+            cwd: this.repoRoot,
+            windowsHide: true,
+            timeout: 300000,
+            maxBuffer: 20 * 1024 * 1024,
+            env: {
+              ...process.env,
+              PYTHONUTF8: "1"
+            }
+          });
+
+          const markdown = await fs.readFile(outputPath, "utf-8");
+          if (!markdown.trim()) {
+            throw new Error("word2md converter returned empty content");
+          }
+          return markdown;
+        } catch (error) {
+          errors.push(`${candidate.command}: ${this.errMsg(error)}`);
+        }
+      }
+    } finally {
+      await fs.rm(outDir, { recursive: true, force: true });
+    }
+
+    throw new Error(errors.join(" | "));
+  }
+
+  private async runTextToMarkdownScript(sourceText: string): Promise<string> {
+    await fs.access(this.textToMdScriptPath);
+    await fs.access(this.wordToMdSamplePath);
+
+    const outDir = await fs.mkdtemp(join(tmpdir(), "kc-text2md-"));
+    const inputPath = join(outDir, "input.txt");
+    const outputPath = join(outDir, "output.txt");
+    const commandCandidates =
+      process.platform === "win32"
+        ? [
+            { command: "python", args: [this.textToMdScriptPath] },
+            { command: "py", args: ["-3", this.textToMdScriptPath] },
+            { command: "python3", args: [this.textToMdScriptPath] }
+          ]
+        : [
+            { command: "python3", args: [this.textToMdScriptPath] },
+            { command: "python", args: [this.textToMdScriptPath] }
+          ];
+
+    const errors: string[] = [];
+
+    try {
+      await fs.writeFile(inputPath, sourceText, "utf-8");
+      for (const candidate of commandCandidates) {
+        try {
+          await this.execFileAsync(
+            candidate.command,
+            [
+              ...candidate.args,
+              "--sample",
+              this.wordToMdSamplePath,
+              "--input",
+              inputPath,
+              "--output",
+              outputPath
+            ],
+            {
+              cwd: this.repoRoot,
+              windowsHide: true,
+              timeout: 300000,
+              maxBuffer: 20 * 1024 * 1024,
+              env: {
+                ...process.env,
+                PYTHONUTF8: "1"
+              }
+            }
+          );
+
+          const markdown = await fs.readFile(outputPath, "utf-8");
+          if (!markdown.trim()) {
+            throw new Error("text2md converter returned empty content");
+          }
+          return markdown;
+        } catch (error) {
+          errors.push(`${candidate.command}: ${this.errMsg(error)}`);
+        }
+      }
+    } finally {
+      await fs.rm(outDir, { recursive: true, force: true });
+    }
+
+    throw new Error(errors.join(" | "));
+  }
+
   private async runLibreOfficeToText(inputPath: string): Promise<string> {
     const outDir = await fs.mkdtemp(join(tmpdir(), "kc-lo-"));
     try {
@@ -596,6 +821,22 @@ export class DocumentService {
       return markdown;
     }
     return `# ${title}\n\n${markdown}`;
+  }
+
+  private extractRawTextFromMarkdown(markdown: string) {
+    return markdown
+      .replace(/^#{1,6}\s+/gm, "")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/&nbsp;/g, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/^[>\-\*]\s+/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  private extractMarkdownTitle(markdown: string) {
+    const match = markdown.match(/^\s*#\s+(.+?)\s*$/m);
+    return match?.[1]?.trim() || null;
   }
 
   private decodeTextBuffer(buffer: Buffer) {
@@ -671,12 +912,26 @@ export class DocumentService {
     }
   }
 
+  private async ensureTitleAvailable(title: string, excludeId?: string) {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) {
+      throw new BadRequestException("Title is required");
+    }
+    const existing = await this.documentRepository.findOne({
+      where: { title: normalizedTitle }
+    });
+    if (existing && existing.id !== excludeId) {
+      throw new BadRequestException(`Document title already exists: ${normalizedTitle}`);
+    }
+  }
+
   private async cleanupFailedUpload(documentId: string, filePath: string) {
     await this.versionRepository.delete({ documentId });
     await this.contentRepository.delete({ documentId });
     await this.taskRepository.delete({ documentId });
     await this.documentRepository.delete({ id: documentId });
     await fs.rm(filePath, { force: true });
+    await fs.rm(this.getDocumentStorageDir(documentId), { recursive: true, force: true });
   }
 
   private async createVersionSnapshot(documentId: string, changedBy?: number, changeNote?: string) {
@@ -724,6 +979,120 @@ export class DocumentService {
         return;
       }
       throw error;
+    }
+  }
+
+  private getDocumentStorageDir(documentId: string) {
+    return join(this.documentsRoot, documentId);
+  }
+
+  private getDocumentAssetPaths(documentId: string) {
+    const rootDir = this.getDocumentStorageDir(documentId);
+    return {
+      rootDir,
+      sourceDir: join(rootDir, "source"),
+      markdownPath: join(rootDir, "content.md"),
+      rawTextPath: join(rootDir, "content.txt"),
+      previewHtmlPath: join(rootDir, "preview.html"),
+      metadataPath: join(rootDir, "metadata.json")
+    };
+  }
+
+  private async syncDocumentAssets(documentId: string) {
+    const document = await this.documentRepository.findOne({ where: { id: documentId } });
+    if (!document) {
+      return;
+    }
+
+    const content = await this.contentRepository.findOne({
+      where: { documentId },
+      order: { createdAt: "DESC" }
+    });
+    if (!content) {
+      return;
+    }
+
+    const latestTask = await this.taskRepository.findOne({
+      where: { documentId },
+      order: { updatedAt: "DESC", createdAt: "DESC" }
+    });
+    const latestVersion = await this.versionRepository.findOne({
+      where: { documentId },
+      order: { versionNo: "DESC" }
+    });
+    const assetPaths = this.getDocumentAssetPaths(documentId);
+    const rawText = content.rawText ?? this.extractRawTextFromMarkdown(content.markdownContent);
+    const previewHtml = await renderPersistedPreviewHtml(content.markdownContent);
+
+    await fs.mkdir(assetPaths.rootDir, { recursive: true });
+    await Promise.all([
+      fs.writeFile(assetPaths.markdownPath, content.markdownContent, "utf-8"),
+      fs.writeFile(assetPaths.rawTextPath, rawText, "utf-8"),
+      fs.writeFile(assetPaths.previewHtmlPath, previewHtml, "utf-8"),
+      fs.writeFile(
+        assetPaths.metadataPath,
+        JSON.stringify(
+          {
+            documentId,
+            title: document.title,
+            archivePath: document.archivePath,
+            currentVersion: document.currentVersion,
+            latestVersionNo: latestVersion?.versionNo ?? document.currentVersion,
+            sourceFilename: latestTask?.sourceFilename ?? null,
+            sourceExt: latestTask?.sourceExt ?? null,
+            sourceFilePath: latestTask?.filePath ?? null,
+            markdownPath: assetPaths.markdownPath,
+            rawTextPath: assetPaths.rawTextPath,
+            previewHtmlPath: assetPaths.previewHtmlPath,
+            updatedAt: document.updatedAt?.toISOString?.() ?? new Date().toISOString()
+          },
+          null,
+          2
+        ),
+        "utf-8"
+      )
+    ]);
+  }
+
+  private async getPersistedAssetDescriptor(documentId: string) {
+    const assetPaths = this.getDocumentAssetPaths(documentId);
+    const sourceFiles = await this.listSourceFiles(assetPaths.sourceDir);
+    return {
+      rootDir: assetPaths.rootDir,
+      sourceFiles,
+      markdownPath: await this.pathIfExists(assetPaths.markdownPath),
+      rawTextPath: await this.pathIfExists(assetPaths.rawTextPath),
+      previewHtmlPath: await this.pathIfExists(assetPaths.previewHtmlPath),
+      metadataPath: await this.pathIfExists(assetPaths.metadataPath)
+    };
+  }
+
+  private async listSourceFiles(sourceDir: string) {
+    try {
+      const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(sourceDir, entry.name))
+        .sort((a, b) => basename(a).localeCompare(basename(b), "zh-CN"));
+    } catch {
+      return [];
+    }
+  }
+
+  private async pathIfExists(path: string) {
+    try {
+      await fs.access(path);
+      return path;
+    } catch {
+      return null;
+    }
+  }
+
+  private async readTextFile(path: string) {
+    try {
+      return await fs.readFile(path, "utf-8");
+    } catch {
+      return null;
     }
   }
 

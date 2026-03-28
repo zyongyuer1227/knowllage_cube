@@ -1,4 +1,5 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
+const UNAUTHORIZED_EVENT = "kc:unauthorized";
 async function request(path, options = {}) {
     const headers = new Headers(options.headers ?? {});
     if (options.token) {
@@ -11,6 +12,14 @@ async function request(path, options = {}) {
     });
     if (!response.ok) {
         const message = await response.text();
+        if (response.status === 401 && options.token) {
+            window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, {
+                detail: {
+                    path
+                }
+            }));
+            throw new Error("登录已失效，请重新登录后再试");
+        }
         throw new Error(message || `Request failed: ${response.status}`);
     }
     const contentType = response.headers.get("content-type") ?? "";
@@ -45,6 +54,28 @@ export const api = {
     publicFolders() {
         return request("/public/search/folders");
     },
+    getPublicWelcomeDocument() {
+        return request("/system/welcome-document");
+    },
+    getAdminWelcomeDocument(token) {
+        return request("/system/admin/welcome-document", { token });
+    },
+    updateAdminWelcomeDocument(payload, token) {
+        return request("/system/admin/welcome-document", {
+            method: "PUT",
+            token,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    },
+    formatTextImport(payload, token) {
+        return request("/admin/documents/format-text-import", {
+            method: "POST",
+            token,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    },
     uploadDocument(formData, token) {
         return request("/admin/documents/upload", {
             method: "POST",
@@ -58,6 +89,9 @@ export const api = {
             token,
             body: formData
         });
+    },
+    getTask(taskId, token) {
+        return request(`/admin/documents/tasks/${taskId}`, { token });
     },
     getDocument(id, token) {
         return request(`/admin/documents/${id}`, { token });
@@ -111,3 +145,4 @@ export const api = {
     },
 };
 export { API_BASE_URL };
+export { UNAUTHORIZED_EVENT };

@@ -62,10 +62,22 @@ function handleFolderDragEnter(node) {
 }
 function handleDrop(event, targetPath) {
     event.preventDefault();
+    event.stopPropagation();
     const payload = event.dataTransfer?.getData("application/x-knowledge-doc-json");
     clearDragTarget();
-    if (!payload)
+    if (!payload) {
+        const docId = event.dataTransfer?.getData("application/x-knowledge-doc-id") || event.dataTransfer?.getData("text/plain");
+        if (!docId)
+            return;
+        const doc = {
+            id: docId,
+            title: event.dataTransfer?.getData("application/x-knowledge-doc-title") || "",
+            archivePath: event.dataTransfer?.getData("application/x-knowledge-doc-path") || "",
+            markdownSource: ""
+        };
+        emit("move", { doc, targetPath });
         return;
+    }
     const doc = JSON.parse(payload);
     emit("move", { doc, targetPath });
 }

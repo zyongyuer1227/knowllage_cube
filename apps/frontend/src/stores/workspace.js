@@ -28,6 +28,9 @@ function buildDemoFolders() {
         { id: "demo-recent", name: "最近文档", fullPath: "最近文档", parentPath: null }
     ];
 }
+function getDefaultDocument() {
+    return buildDemoDocs()[0];
+}
 function normalizeFolder(value) {
     return value
         .split("/")
@@ -59,6 +62,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const docs = ref([]);
     const folders = ref([]);
     const activeId = ref("");
+    const mode = ref("public");
+    const defaultDocument = ref(getDefaultDocument());
+    const hasUserSelectedDocument = ref(false);
     const loading = ref(false);
     const saving = ref(false);
     const initialized = ref(false);
@@ -67,7 +73,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const editorTitle = ref("");
     const editorArchivePath = ref("");
     const editorMarkdown = ref("");
-    const activeDocument = computed(() => docs.value.find((doc) => doc.id === activeId.value) ?? docs.value[0] ?? null);
+    const activeDocument = computed(() => {
+        if (!hasUserSelectedDocument.value) {
+            return defaultDocument.value;
+        }
+        return docs.value.find((doc) => doc.id === activeId.value) ?? docs.value[0] ?? defaultDocument.value;
+    });
     const tree = computed(() => {
         const folderPathSet = new Set();
         folders.value.forEach((folder) => ensureFolderPathSet(folderPathSet, folder.fullPath));
@@ -125,15 +136,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     function ensureInitialized() {
         if (initialized.value)
             return;
-        docs.value = buildDemoDocs();
-        folders.value = buildDemoFolders();
-        activeId.value = docs.value[0]?.id ?? "";
+        docs.value = [];
+        folders.value = [];
+        activeId.value = "";
+        hasUserSelectedDocument.value = false;
+        defaultDocument.value = getDefaultDocument();
         syncEditorFromActive();
         initialized.value = true;
         usingAdminData.value = false;
     }
     function setActive(id) {
         activeId.value = id;
+        hasUserSelectedDocument.value = true;
         syncEditorFromActive();
     }
     function setSelectedFolder(path) {
@@ -141,16 +155,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     async function loadPublicWorkspace() {
         ensureInitialized();
+        mode.value = "public";
         loading.value = true;
         try {
-            const [searchResult, folderResult] = await Promise.all([
+            const [searchResult, folderResult, welcome] = await Promise.all([
                 api.publicSearch({
                     page: 1,
                     pageSize: 100,
                     sortBy: "updatedAt",
                     order: "desc"
                 }),
-                api.publicFolders()
+                api.publicFolders(),
+                api.getPublicWelcomeDocument()
             ]);
             const details = await Promise.all(searchResult.items.map(async (item) => {
                 const doc = await api.publicDocument(String(item.id));
@@ -159,17 +175,29 @@ export const useWorkspaceStore = defineStore("workspace", () => {
                     title: String(doc.title ?? ""),
                     archivePath: String(doc.archivePath ?? item.archivePath ?? ""),
                     markdownSource: String(doc.markdownContent ?? ""),
+                    rawText: doc.rawText ? String(doc.rawText) : undefined,
+                    previewHtml: doc.previewHtml ? String(doc.previewHtml) : undefined,
                     updatedAt: String(doc.updatedAt ?? item.updatedAt ?? "")
                 };
             }));
             docs.value = details;
+            defaultDocument.value = {
+                id: "welcome",
+                title: String(welcome.title ?? "欢迎.md"),
+                archivePath: "",
+                markdownSource: String(welcome.markdownContent ?? ""),
+                previewHtml: String(welcome.previewHtml ?? "")
+            };
             folders.value = folderResult.items.map((item) => ({
                 id: String(item.id),
                 name: String(item.name),
                 fullPath: String(item.fullPath),
                 parentPath: item.parentPath ? String(item.parentPath) : null
             }));
-            activeId.value = details.some((doc) => doc.id === activeId.value) ? activeId.value : details[0]?.id ?? "";
+            if (!details.some((doc) => doc.id === activeId.value)) {
+                activeId.value = "";
+                hasUserSelectedDocument.value = false;
+            }
             syncEditorFromActive();
             usingAdminData.value = false;
         }
@@ -179,16 +207,18 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     async function loadAdminWorkspace(token) {
         ensureInitialized();
+        mode.value = "admin";
         loading.value = true;
         try {
-            const [searchResult, folderResult] = await Promise.all([
+            const [searchResult, folderResult, welcome] = await Promise.all([
                 api.publicSearch({
                     page: 1,
                     pageSize: 100,
                     sortBy: "updatedAt",
                     order: "desc"
                 }),
-                api.listFolders(token)
+                api.listFolders(token),
+                api.getAdminWelcomeDocument(token)
             ]);
             const details = await Promise.all(searchResult.items.map(async (item) => {
                 const doc = await api.getDocument(String(item.id), token);
@@ -197,17 +227,29 @@ export const useWorkspaceStore = defineStore("workspace", () => {
                     title: String(doc.title ?? ""),
                     archivePath: String(doc.archivePath ?? ""),
                     markdownSource: String(doc.markdownContent ?? ""),
+                    rawText: doc.rawText ? String(doc.rawText) : undefined,
+                    previewHtml: doc.previewHtml ? String(doc.previewHtml) : undefined,
                     updatedAt: String(doc.updatedAt ?? "")
                 };
             }));
             docs.value = details;
+            defaultDocument.value = {
+                id: "welcome",
+                title: String(welcome.title ?? "欢迎.md"),
+                archivePath: "",
+                markdownSource: String(welcome.markdownContent ?? ""),
+                previewHtml: String(welcome.previewHtml ?? "")
+            };
             folders.value = folderResult.items.map((item) => ({
                 id: String(item.id),
                 name: String(item.name),
                 fullPath: String(item.fullPath),
                 parentPath: item.parentPath ? String(item.parentPath) : null
             }));
-            activeId.value = details.some((doc) => doc.id === activeId.value) ? activeId.value : details[0]?.id ?? "";
+            if (!details.some((doc) => doc.id === activeId.value)) {
+                activeId.value = "";
+                hasUserSelectedDocument.value = false;
+            }
             syncEditorFromActive();
             usingAdminData.value = true;
         }
@@ -245,12 +287,86 @@ export const useWorkspaceStore = defineStore("workspace", () => {
             formData.append("archivePath", targetPath);
         }
         if (files.length > 1) {
-            await api.uploadBatch(formData, token);
+            const result = await api.uploadBatch(formData, token);
+            const items = Array.isArray(result.items) ? result.items : [];
+            return {
+                tasks: items
+                    .filter((item) => item.success === true && item.taskId && item.documentId)
+                    .map((item) => ({
+                    documentId: String(item.documentId),
+                    taskId: String(item.taskId),
+                    fileName: String(item.fileName ?? "")
+                }))
+            };
         }
         else {
-            await api.uploadDocument(formData, token);
+            const result = await api.uploadDocument(formData, token);
+            if (!result.documentId || !result.taskId) {
+                throw new Error("上传成功但未返回转换任务");
+            }
+            return {
+                tasks: [
+                    {
+                        documentId: String(result.documentId),
+                        taskId: String(result.taskId),
+                        fileName: files[0].name
+                    }
+                ]
+            };
+        }
+    }
+    async function waitForImportTasks(token, tasks, onProgress) {
+        if (tasks.length === 0) {
+            await loadAdminWorkspace(token);
+            return {
+                completed: [],
+                failed: []
+            };
+        }
+        const pending = new Map(tasks.map((task) => [task.taskId, task]));
+        const completed = [];
+        const failed = [];
+        let activeFileName = tasks[0]?.fileName ?? "";
+        while (pending.size > 0) {
+            const statuses = await Promise.all(Array.from(pending.values()).map(async (task) => ({
+                task,
+                status: await api.getTask(task.taskId, token)
+            })));
+            for (const { task, status } of statuses) {
+                if (status.status === "success") {
+                    pending.delete(task.taskId);
+                    completed.push(task);
+                    activeFileName = task.fileName;
+                    continue;
+                }
+                if (status.status === "failed") {
+                    pending.delete(task.taskId);
+                    failed.push({
+                        ...task,
+                        errorMessage: status.errorMessage
+                    });
+                    activeFileName = task.fileName;
+                }
+            }
+            onProgress?.({
+                total: tasks.length,
+                completed: completed.length,
+                failed: failed.length,
+                activeFileName: pending.values().next().value?.fileName ?? activeFileName
+            });
+            if (pending.size > 0) {
+                await new Promise((resolve) => window.setTimeout(resolve, 1500));
+            }
         }
         await loadAdminWorkspace(token);
+        const latestCompleted = completed[completed.length - 1];
+        if (latestCompleted) {
+            setActive(latestCompleted.documentId);
+        }
+        return {
+            completed,
+            failed
+        };
     }
     async function createFolder(token, folderName) {
         const normalized = normalizeFolder(folderName);
@@ -263,7 +379,23 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         if (!activeDocument.value)
             return;
         if (!isPersistedDocumentId(activeDocument.value.id)) {
-            throw new Error("当前文档是演示文档，不能直接保存到后端");
+            if (mode.value !== "admin") {
+                throw new Error("当前文档不可保存");
+            }
+            defaultDocument.value = await api.updateAdminWelcomeDocument({
+                title: editorTitle.value.trim() || "欢迎.md",
+                markdownContent: editorMarkdown.value,
+                changeNote: "Admin fallback welcome document update"
+            }, token).then((doc) => ({
+                id: "welcome",
+                title: String(doc.title ?? "欢迎.md"),
+                archivePath: "",
+                markdownSource: String(doc.markdownContent ?? ""),
+                previewHtml: String(doc.previewHtml ?? "")
+            }));
+            hasUserSelectedDocument.value = false;
+            syncEditorFromActive();
+            return;
         }
         saving.value = true;
         try {
@@ -292,6 +424,64 @@ export const useWorkspaceStore = defineStore("workspace", () => {
             setActive(movedDoc.id);
         }
     }
+    async function formatEditorTextWithAi(token, onProgress) {
+        const title = editorTitle.value.trim() || activeDocument.value?.title?.replace(/\.md$/i, "") || "未命名文档";
+        const text = editorMarkdown.value.trim();
+        if (!text) {
+            throw new Error("编辑框内容为空");
+        }
+        onProgress?.({
+            stage: "llm",
+            percent: 18,
+            label: "大模型处理中"
+        });
+        const result = await api.formatTextImport({
+            documentId: isPersistedDocumentId(activeDocument.value?.id ?? "") ? activeDocument.value?.id : undefined,
+            title,
+            text,
+            archivePath: toArchivePath(selectedFolderPath.value || editorArchivePath.value)
+        }, token);
+        const taskId = String(result.taskId ?? "");
+        const documentId = String(result.documentId ?? "");
+        if (!documentId) {
+            throw new Error("格式化成功但未返回文档信息");
+        }
+        if (!taskId) {
+            onProgress?.({
+                stage: "import",
+                percent: 100,
+                label: "导入处理中"
+            });
+            await loadAdminWorkspace(token);
+            setActive(documentId);
+            return documentId;
+        }
+        onProgress?.({
+            stage: "import",
+            percent: 55,
+            label: "导入处理中"
+        });
+        const waitResult = await waitForImportTasks(token, [
+            {
+                documentId,
+                taskId,
+                fileName: `${title}.txt`
+            }
+        ], (snapshot) => {
+            const ratio = snapshot.total === 0 ? 0 : (snapshot.completed + snapshot.failed) / snapshot.total;
+            onProgress?.({
+                stage: "import",
+                percent: Math.round(55 + ratio * 45),
+                label: snapshot.completed + snapshot.failed >= snapshot.total
+                    ? "导入处理中"
+                    : `导入处理中：${snapshot.activeFileName || `${title}.txt`}`
+            });
+        });
+        if (waitResult.failed.length > 0) {
+            throw new Error(waitResult.failed[0]?.errorMessage || "格式化导入失败");
+        }
+        return documentId;
+    }
     return {
         activeDocument,
         activeId,
@@ -305,10 +495,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         folders,
         importFiles,
         initialized,
+        mode,
         loadAdminWorkspace,
         loadPublicWorkspace,
         loading,
         moveDocument,
+        formatEditorTextWithAi,
         saveActiveDocument,
         saving,
         setActive,
@@ -316,6 +508,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         selectedFolderPath,
         syncEditorFromActive,
         tree,
+        waitForImportTasks,
         usingAdminData
     };
 });

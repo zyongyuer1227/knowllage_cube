@@ -95,9 +95,21 @@ function handleFolderDragEnter(node: WorkspaceTreeNode) {
 
 function handleDrop(event: DragEvent, targetPath: string) {
   event.preventDefault();
+  event.stopPropagation();
   const payload = event.dataTransfer?.getData("application/x-knowledge-doc-json");
   clearDragTarget();
-  if (!payload) return;
+  if (!payload) {
+    const docId = event.dataTransfer?.getData("application/x-knowledge-doc-id") || event.dataTransfer?.getData("text/plain");
+    if (!docId) return;
+    const doc = {
+      id: docId,
+      title: event.dataTransfer?.getData("application/x-knowledge-doc-title") || "",
+      archivePath: event.dataTransfer?.getData("application/x-knowledge-doc-path") || "",
+      markdownSource: ""
+    } satisfies WorkspaceDoc;
+    emit("move", { doc, targetPath });
+    return;
+  }
   const doc = JSON.parse(payload) as WorkspaceDoc;
   emit("move", { doc, targetPath });
 }
@@ -121,7 +133,7 @@ function handleDrop(event: DragEvent, targetPath: string) {
           $event.dataTransfer && ($event.dataTransfer.dropEffect = 'move');
         "
         @dragleave="clearDragTarget"
-        @drop="handleDrop($event, node.fullPath)"
+        @drop.stop="handleDrop($event, node.fullPath)"
       >
         <span class="folder-sign">
           <FaIcon :name="isOpen(node.key) ? 'square-minus' : 'square-plus'" fixed-width />
@@ -163,7 +175,7 @@ function handleDrop(event: DragEvent, targetPath: string) {
               $event.dataTransfer && ($event.dataTransfer.dropEffect = 'move');
             "
             @dragleave="clearDragTarget"
-            @drop="handleDrop($event, node.fullPath)"
+            @drop.stop="handleDrop($event, node.fullPath)"
           >
             <button
               v-if="canDelete"

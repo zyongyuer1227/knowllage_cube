@@ -1,6 +1,6 @@
 import { computed, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
-import MarkdownRenderer from "../components/MarkdownRenderer.vue";
+import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
 import { useWorkspaceStore } from "../stores/workspace";
 const workspace = useWorkspaceStore();
@@ -49,6 +49,7 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['search-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace']} */ ;
 /** @type {__VLS_StyleScopedClasses['file-pane']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace']} */ ;
@@ -202,14 +203,22 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElemen
     ...{ class: "editor-surface" },
 });
 if (__VLS_ctx.workspace.activeDocument) {
-    /** @type {[typeof MarkdownRenderer, ]} */ ;
+    /** @type {[typeof GovDocPreview, ]} */ ;
     // @ts-ignore
-    const __VLS_20 = __VLS_asFunctionalComponent(MarkdownRenderer, new MarkdownRenderer({
+    const __VLS_20 = __VLS_asFunctionalComponent(GovDocPreview, new GovDocPreview({
         source: (__VLS_ctx.workspace.activeDocument.markdownSource),
+        persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
     }));
     const __VLS_21 = __VLS_20({
         source: (__VLS_ctx.workspace.activeDocument.markdownSource),
+        persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
     }, ...__VLS_functionalComponentArgsRest(__VLS_20));
+}
+else {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "guest-empty-state" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 }
 /** @type {__VLS_StyleScopedClasses['workspace']} */ ;
 /** @type {__VLS_StyleScopedClasses['file-pane']} */ ;
@@ -228,12 +237,13 @@ if (__VLS_ctx.workspace.activeDocument) {
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
 /** @type {__VLS_StyleScopedClasses['active']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-surface']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-empty-state']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             FaIcon: FaIcon,
-            MarkdownRenderer: MarkdownRenderer,
+            GovDocPreview: GovDocPreview,
             WorkspaceTree: WorkspaceTree,
             workspace: workspace,
             search: search,

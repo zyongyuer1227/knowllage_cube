@@ -1,0 +1,29 @@
+@font-face {
+    font-family: "FangSong";
+    src: url("../fonts/FangSong.ttf") format("truetype");
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "KaiTi";
+    src: url("../fonts/KaiTi.ttf") format("truetype");
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "SimHei";
+    src: url("../fonts/SimHei.ttf") format("truetype");
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "FZXBSJW";
+    src: url("../fonts/FZXBSJW.TTF") format("truetype");
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "FZXiaoBiaoSong-B05S";
+    src: url("../fonts/FZXBSJW.TTF") format("truetype");
+    font-display: swap;
+}

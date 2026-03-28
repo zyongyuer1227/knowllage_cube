@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
-import MarkdownRenderer from "../components/MarkdownRenderer.vue";
+import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
 import { useAppSettings } from "../lib/app-settings";
 import { api } from "../lib/api";
@@ -19,6 +19,13 @@ const openFolders = ref<string[]>([]);
 const selectedDocumentIds = ref<string[]>([]);
 const showSettings = ref(false);
 const settingsBusy = ref(false);
+const formatBusy = ref(false);
+const formatProgress = ref(0);
+const formatStageLabel = ref("");
+const markdownTextarea = ref<HTMLTextAreaElement | null>(null);
+const previewFrame = ref<InstanceType<typeof GovDocPreview> | null>(null);
+const syncSource = ref<"editor" | "preview" | null>(null);
+const settingsBackdropPressed = ref(false);
 
 const settingsForm = ref({
   title: branding.title,
@@ -71,6 +78,46 @@ function clearSelection() {
   selectedDocumentIds.value = [];
 }
 
+function withScrollSyncLock(source: "editor" | "preview", callback: () => void) {
+  syncSource.value = source;
+  callback();
+  requestAnimationFrame(() => {
+    if (syncSource.value === source) {
+      syncSource.value = null;
+    }
+  });
+}
+
+function getEditorScrollRatio() {
+  const textarea = markdownTextarea.value;
+  if (!textarea) return 0;
+  const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
+  if (maxScrollTop <= 0) return 0;
+  return textarea.scrollTop / maxScrollTop;
+}
+
+function setEditorScrollRatio(value: number) {
+  const textarea = markdownTextarea.value;
+  if (!textarea) return;
+  const ratio = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+  const maxScrollTop = textarea.scrollHeight - textarea.clientHeight;
+  textarea.scrollTop = maxScrollTop > 0 ? maxScrollTop * ratio : 0;
+}
+
+function syncPreviewFromEditor() {
+  if (syncSource.value === "preview") return;
+  withScrollSyncLock("editor", () => {
+    previewFrame.value?.setScrollRatio(getEditorScrollRatio());
+  });
+}
+
+function syncEditorFromPreview(ratio: number) {
+  if (syncSource.value === "editor") return;
+  withScrollSyncLock("preview", () => {
+    setEditorScrollRatio(ratio);
+  });
+}
+
 async function login() {
   loginError.value = "";
   try {
@@ -91,6 +138,33 @@ async function saveCurrentDocument() {
   }
 }
 
+async function normalizeMarkdown() {
+  if (!auth.token) return;
+  formatBusy.value = true;
+  formatProgress.value = 8;
+  formatStageLabel.value = "大模型处理中";
+  statusMessage.value = "";
+  try {
+    await workspace.formatEditorTextWithAi(auth.token, (snapshot) => {
+      formatProgress.value = snapshot.percent;
+      formatStageLabel.value = snapshot.label;
+    });
+    formatProgress.value = 100;
+    formatStageLabel.value = "导入完成";
+    statusMessage.value = "已调用大模型完成格式化并导入新文档";
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : "大模型格式化失败";
+  } finally {
+    formatBusy.value = false;
+    window.setTimeout(() => {
+      if (!formatBusy.value) {
+        formatProgress.value = 0;
+        formatStageLabel.value = "";
+      }
+    }, 1000);
+  }
+}
+
 function openSettings() {
   settingsForm.value = {
     title: branding.title,
@@ -103,6 +177,7 @@ function openSettings() {
 
 function closeSettings() {
   showSettings.value = false;
+  settingsBackdropPressed.value = false;
 }
 
 async function saveSettings() {
@@ -114,6 +189,20 @@ async function saveSettings() {
   } finally {
     settingsBusy.value = false;
   }
+}
+
+function handleSettingsBackdropPointerDown() {
+  settingsBackdropPressed.value = true;
+}
+
+function handleSettingsBackdropPointerUp() {
+  if (settingsBackdropPressed.value) {
+    closeSettings();
+  }
+}
+
+function cancelSettingsBackdropClose() {
+  settingsBackdropPressed.value = false;
 }
 
 function restoreSettings() {
@@ -204,6 +293,15 @@ watch(
     selectedDocumentIds.value = selectedDocumentIds.value.filter((id) => ids.includes(id));
   },
   { immediate: true }
+);
+
+watch(
+  () => workspace.activeId,
+  async () => {
+    await nextTick();
+    setEditorScrollRatio(0);
+    previewFrame.value?.setScrollRatio(0);
+  }
 );
 
 onMounted(async () => {
@@ -303,28 +401,43 @@ onMounted(async () => {
 
             <div class="editor-split">
               <section class="editor-panel">
-                <div class="panel-title">
-                  <FaIcon name="code" fixed-width />
-                  <span>Markdown 源码</span>
+                <div class="panel-title panel-title-row">
+                  <div class="panel-title-main">
+                    <FaIcon name="code" fixed-width />
+                    <span>Markdown 源码</span>
+                  </div>
+                  <button type="button" class="subtle-btn convert-btn" :disabled="formatBusy" @click="normalizeMarkdown">
+                    <FaIcon name="wand-magic-sparkles" fixed-width />
+                    <span>{{ formatBusy ? "大模型处理中..." : "一键转换md格式" }}</span>
+                  </button>
                 </div>
                 <label class="editor-field">
-                  <textarea v-model="workspace.editorMarkdown"></textarea>
+                  <textarea ref="markdownTextarea" v-model="workspace.editorMarkdown" @scroll="syncPreviewFromEditor"></textarea>
                 </label>
               </section>
 
               <section class="preview-panel">
                 <div class="panel-title">
                   <FaIcon name="eye" fixed-width />
-                  <span>实时预览</span>
+                  <span>HTML 预览</span>
                 </div>
                 <div class="preview-surface">
-                  <MarkdownRenderer :source="workspace.editorMarkdown" />
+                  <GovDocPreview ref="previewFrame" :source="workspace.editorMarkdown" @scroll-ratio="syncEditorFromPreview" />
                 </div>
               </section>
             </div>
           </article>
 
           <footer class="editor-footer">
+            <div v-if="formatProgress > 0" class="format-progress">
+              <div class="format-progress-meta">
+                <span>{{ formatStageLabel || "处理中" }}</span>
+                <span>{{ formatProgress }}%</span>
+              </div>
+              <div class="format-progress-track">
+                <div class="format-progress-fill" :style="{ width: `${formatProgress}%` }"></div>
+              </div>
+            </div>
             <p v-if="statusMessage" class="status">{{ statusMessage }}</p>
             <div class="action-row">
               <button class="save-btn secondary-btn" type="button" @click="openSettings">
@@ -345,8 +458,13 @@ onMounted(async () => {
       </section>
     </section>
 
-    <div v-if="showSettings" class="settings-backdrop" @click.self="closeSettings">
-      <section class="settings-dialog">
+    <div
+      v-if="showSettings"
+      class="settings-backdrop"
+      @mousedown.self="handleSettingsBackdropPointerDown"
+      @mouseup.self="handleSettingsBackdropPointerUp"
+    >
+      <section class="settings-dialog" @mousedown="cancelSettingsBackdropClose" @mouseup="cancelSettingsBackdropClose">
         <header class="settings-header">
           <div>
             <p class="panel-eyebrow">系统参数</p>
@@ -687,6 +805,22 @@ textarea {
   color: var(--text-muted);
 }
 
+.panel-title-row {
+  justify-content: space-between;
+}
+
+.panel-title-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.convert-btn {
+  min-height: 26px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
 .preview-surface {
   flex: 1 1 auto;
   height: 100%;
@@ -705,6 +839,35 @@ textarea {
   padding: 12px 24px 16px;
   border-top: 1px solid var(--border-color);
   background: var(--panel-header-bg);
+}
+
+.format-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.format-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.format-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-muted-bg) 70%, transparent);
+  overflow: hidden;
+}
+
+.format-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2f6fed, #50b36a);
+  transition: width 180ms ease;
 }
 
 .action-row {

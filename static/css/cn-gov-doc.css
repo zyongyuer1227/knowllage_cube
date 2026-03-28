@@ -1,0 +1,188 @@
+@import url("./font.css");
+
+:root {
+  --size-2: 22pt; 
+  --size-3: 16pt; 
+  --size-4: 14pt; 
+  --line-height: 28pt;
+  --red: #B22222;
+  --black: #000000;
+}
+
+@page {
+  size: A4;
+  margin-top: 37mm;
+  margin-bottom: 35mm;
+  margin-left: 28mm;
+  margin-right: 26mm;
+
+  /* 页码 GB/T 9704-2012 7.5 */
+  @bottom-center {
+    content: counter(page);
+    font-family: "SimSun", "宋体", serif;
+    font-size: var(--size-4);
+    margin-bottom: 7mm;
+  }
+}
+@page:left { @bottom-left { content: counter(page); } @bottom-right { content: none; } }
+@page:right { @bottom-right { content: counter(page); } @bottom-left { content: none; } }
+
+body {
+  width: 210mm;
+  margin: 0 auto;
+  background: white;
+  font-family: "FangSong", "仿宋", "STFangsong", serif;
+  font-size: var(--size-3);
+  line-height: var(--line-height);
+  color: black;
+  text-align: justify;
+}
+
+/* 正文 */
+p {
+  font-family: "FangSong";
+  font-size: var(--size-3);
+  line-height: var(--line-height);
+  text-indent: 2em;
+  margin: 0;
+}
+
+/* 公文标题（2号小标宋） */
+h1 {
+  font-family: "FZXiaoBiaoSong-B05S";
+  font-size: var(--size-2);
+  font-weight: normal;
+  text-align: center;
+  line-height: var(--line-height);
+  margin-bottom: 56pt;
+}
+
+/* 一级标题 一、 二、 三、（黑体） */
+h2 {
+  font-family: "SimHei";
+  font-size: var(--size-3);
+  font-weight: normal;
+  text-align: center;
+  line-height: var(--line-height);
+  text-indent: 0;
+  margin:0;
+}
+
+/* 二级标题（一）（二）（三）（楷体） */
+h3 {
+  font-family: "KaiTi";
+  font-size: var(--size-3);
+  font-weight: normal;
+  line-height: var(--line-height);
+  text-indent: 0;
+  margin:0;
+}
+
+/* 三级标题 1. 2. 3.（仿宋） */
+h4 {
+  font-family: "FangSong";
+  font-size: var(--size-3);
+  font-weight: normal;
+  line-height: var(--line-height);
+  text-indent: 0;
+  margin:0;
+}
+
+/* 四级标题（1）（2）（3）（仿宋） */
+h5 {
+  font-family: "FangSong";
+  font-size: var(--size-3);
+  font-weight: normal;
+  line-height: var(--line-height);
+  text-indent: 0;
+  margin:0;
+}
+
+.red-head {
+  text-align: center;
+  color: var(--red);
+  font-family: "FZXiaoBiaoSong-B05S", "方正小标宋简体", serif;
+  font-size: var(--size-2);
+  margin-bottom: 56pt; /* 下空2行 */
+}
+
+.doc-number {
+  text-align: center;
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-3);
+  border-bottom: 1px solid var(--red);
+  padding-bottom: 4mm; /* 红色分隔线下距4mm */
+  margin-bottom: 56pt;
+}
+
+
+.signer {
+  text-align: right;
+  font-family: "KaiTi", "楷体", serif;
+  font-size: var(--size-3);
+}
+
+/* ==================================
+主送机关 GB/T 9704-2012 7.3.2
+================================== */
+.to-unit {
+  text-indent: 0;
+  text-align: left;
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-3);
+}
+
+
+.signature {
+  text-align: right;
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-3);
+  padding-right: 4em; /* 右空4字 */
+}
+
+.annotation {
+  text-indent: 2em;
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-4);
+}
+
+
+/* 版记粗线 */
+.separator-bold {
+  border-top: 0.35mm solid black;
+  margin: 2mm 0;
+  page-break-after: avoid;
+}
+/* 版记细线 */
+.separator-light {
+  border-top: 0.25mm solid black;
+  margin: 1mm 0;
+  page-break-after: avoid;
+}
+
+/* 抄送、印发机关 */
+.copy, .print-info {
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-4);
+  text-indent: 0;
+}
+
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "FangSong", "仿宋", serif;
+  font-size: var(--size-3);
+  page-break-inside: avoid;
+}
+td, th {
+  border: 0.7pt solid black;
+  padding: 1.5mm;
+}
+
+
+@media print {
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .red-head, .doc-number { color: var(--red) !important; }
+  .page-break { page-break-before: always; }
+}

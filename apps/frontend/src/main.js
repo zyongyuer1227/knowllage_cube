@@ -3,6 +3,7 @@ import { createApp } from "vue";
 import App from "./App.vue";
 import { router } from "./router";
 import "../../../static/fontawesome/css/all.min.css";
+import "../../../static/css/font.css";
 import "./styles/local-fonts.css";
 const app = createApp(App);
 app.use(createPinia());
