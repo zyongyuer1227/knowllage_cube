@@ -8,7 +8,7 @@ const dragTargetKey = ref("");
 function matchesDocument(doc) {
     if (!keyword.value)
         return true;
-    const haystack = `${doc.title} ${doc.archivePath}`.toLowerCase();
+    const haystack = `${doc.title} ${doc.archivePath} ${doc.businessPath.join(" ")} ${doc.legalPath.join(" ")}`.toLowerCase();
     return haystack.includes(keyword.value);
 }
 function filterNode(node) {
@@ -73,6 +73,8 @@ function handleDrop(event, targetPath) {
             id: docId,
             title: event.dataTransfer?.getData("application/x-knowledge-doc-title") || "",
             archivePath: event.dataTransfer?.getData("application/x-knowledge-doc-path") || "",
+            businessPath: [],
+            legalPath: [],
             markdownSource: ""
         };
         emit("move", { doc, targetPath });

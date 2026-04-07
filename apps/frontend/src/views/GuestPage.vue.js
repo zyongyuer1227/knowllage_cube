@@ -2,11 +2,14 @@ import { computed, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
 import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
+import { api } from "../lib/api";
 import { useWorkspaceStore } from "../stores/workspace";
 const workspace = useWorkspaceStore();
 const search = ref("");
 const sidebarCollapsed = ref(false);
 const openFolders = ref([]);
+const exportBusy = ref(false);
+const exportError = ref("");
 const treeKeys = computed(() => {
     const keys = [];
     const walk = (nodes) => {
@@ -35,6 +38,31 @@ onMounted(async () => {
     workspace.ensureInitialized();
     await workspace.loadPublicWorkspace();
 });
+async function exportCurrentDocument() {
+    const doc = workspace.activeDocument;
+    if (!doc || !/^\d+$/.test(doc.id)) {
+        return;
+    }
+    exportBusy.value = true;
+    exportError.value = "";
+    try {
+        const blob = await api.publicExportDocumentPdf(doc.id);
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${doc.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_") || "document"}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    }
+    catch (error) {
+        exportError.value = error instanceof Error ? error.message : "导出失败";
+    }
+    finally {
+        exportBusy.value = false;
+    }
+}
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
@@ -49,6 +77,9 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['search-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
+/** @type {__VLS_StyleScopedClasses['export-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['export-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-banner']} */ ;
 /** @type {__VLS_StyleScopedClasses['guest-empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['workspace']} */ ;
 /** @type {__VLS_StyleScopedClasses['file-pane']} */ ;
@@ -199,20 +230,54 @@ const __VLS_18 = __VLS_17({
 }, ...__VLS_functionalComponentArgsRest(__VLS_17));
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 (__VLS_ctx.workspace.activeDocument?.title || "未选择文档");
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "guest-actions" },
+});
+if (/^\d+$/.test(__VLS_ctx.workspace.activeDocument?.id || '')) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.exportCurrentDocument) },
+        type: "button",
+        ...{ class: "export-btn" },
+        disabled: (__VLS_ctx.exportBusy),
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_20 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "file-arrow-down",
+        fixedWidth: true,
+    }));
+    const __VLS_21 = __VLS_20({
+        name: "file-arrow-down",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_20));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.exportBusy ? "导出中..." : "导出文档");
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
     ...{ class: "editor-surface" },
 });
+if (__VLS_ctx.exportError) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "guest-banner error" },
+    });
+    (__VLS_ctx.exportError);
+}
 if (__VLS_ctx.workspace.activeDocument) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "guest-preview-shell" },
+    });
     /** @type {[typeof GovDocPreview, ]} */ ;
     // @ts-ignore
-    const __VLS_20 = __VLS_asFunctionalComponent(GovDocPreview, new GovDocPreview({
+    const __VLS_23 = __VLS_asFunctionalComponent(GovDocPreview, new GovDocPreview({
         source: (__VLS_ctx.workspace.activeDocument.markdownSource),
         persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
+        autoHeight: true,
     }));
-    const __VLS_21 = __VLS_20({
+    const __VLS_24 = __VLS_23({
         source: (__VLS_ctx.workspace.activeDocument.markdownSource),
         persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_20));
+        autoHeight: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_23));
 }
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -236,7 +301,12 @@ else {
 /** @type {__VLS_StyleScopedClasses['editor-topline']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
 /** @type {__VLS_StyleScopedClasses['active']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['export-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-surface']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-banner']} */ ;
+/** @type {__VLS_StyleScopedClasses['error']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-preview-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['guest-empty-state']} */ ;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
@@ -249,7 +319,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             search: search,
             sidebarCollapsed: sidebarCollapsed,
             openFolders: openFolders,
+            exportBusy: exportBusy,
+            exportError: exportError,
             toggleFolder: toggleFolder,
+            exportCurrentDocument: exportCurrentDocument,
         };
     },
 });

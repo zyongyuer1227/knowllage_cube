@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { AuditModule } from "../audit/audit.module";
+import { SystemModule } from "../system/system.module";
 import { DocumentController } from "./document.controller";
 import { DocumentService } from "./document.service";
 import { DocumentContentEntity } from "./entities/document-content.entity";
@@ -12,6 +13,7 @@ import { DocumentVersionEntity } from "./entities/document-version.entity";
 @Module({
   imports: [
     AuditModule,
+    SystemModule,
     TypeOrmModule.forFeature([
       DocumentEntity,
       DocumentFolderEntity,
@@ -21,6 +23,7 @@ import { DocumentVersionEntity } from "./entities/document-version.entity";
     ])
   ],
   controllers: [DocumentController],
-  providers: [DocumentService]
+  providers: [DocumentService],
+  exports: [DocumentService]
 })
 export class DocumentModule {}

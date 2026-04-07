@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
 import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
+import { api } from "../lib/api";
 import { useWorkspaceStore, type WorkspaceTreeNode } from "../stores/workspace";
 
 const workspace = useWorkspaceStore();
@@ -10,6 +11,8 @@ const workspace = useWorkspaceStore();
 const search = ref("");
 const sidebarCollapsed = ref(false);
 const openFolders = ref<string[]>([]);
+const exportBusy = ref(false);
+const exportError = ref("");
 
 const treeKeys = computed(() => {
   const keys: string[] = [];
@@ -47,6 +50,31 @@ onMounted(async () => {
   workspace.ensureInitialized();
   await workspace.loadPublicWorkspace();
 });
+
+async function exportCurrentDocument() {
+  const doc = workspace.activeDocument;
+  if (!doc || !/^\d+$/.test(doc.id)) {
+    return;
+  }
+
+  exportBusy.value = true;
+  exportError.value = "";
+  try {
+    const blob = await api.publicExportDocumentPdf(doc.id);
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${doc.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_") || "document"}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : "导出失败";
+  } finally {
+    exportBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -94,14 +122,29 @@ onMounted(async () => {
             <span>{{ workspace.activeDocument?.title || "未选择文档" }}</span>
           </button>
         </div>
+        <div class="guest-actions">
+          <button
+            v-if="/^\d+$/.test(workspace.activeDocument?.id || '')"
+            type="button"
+            class="export-btn"
+            :disabled="exportBusy"
+            @click="exportCurrentDocument"
+          >
+            <FaIcon name="file-arrow-down" fixed-width />
+            <span>{{ exportBusy ? "导出中..." : "导出文档" }}</span>
+          </button>
+        </div>
       </header>
 
       <article class="editor-surface">
-        <GovDocPreview
-          v-if="workspace.activeDocument"
-          :source="workspace.activeDocument.markdownSource"
-          :persisted-html="workspace.activeDocument.previewHtml"
-        />
+        <p v-if="exportError" class="guest-banner error">{{ exportError }}</p>
+        <div v-if="workspace.activeDocument" class="guest-preview-shell">
+          <GovDocPreview
+            :source="workspace.activeDocument.markdownSource"
+            :persisted-html="workspace.activeDocument.previewHtml"
+            auto-height
+          />
+        </div>
         <div v-else class="guest-empty-state">
           <p>请选择左侧文档开始浏览。</p>
         </div>
@@ -276,6 +319,7 @@ onMounted(async () => {
   border-bottom: 1px solid var(--border-color);
   padding: 0 12px;
   display: flex;
+  justify-content: space-between;
   align-items: end;
   background: var(--panel-header-bg);
 }
@@ -303,11 +347,60 @@ onMounted(async () => {
   background: var(--panel-muted-bg);
 }
 
+.guest-actions {
+  display: inline-flex;
+  align-items: center;
+  padding-bottom: 6px;
+}
+
+.export-btn {
+  border: 1px solid var(--button-border);
+  background: var(--button-bg);
+  color: var(--button-text);
+  border-radius: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.export-btn:hover {
+  background: var(--hover-bg);
+}
+
+.export-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .editor-surface {
   padding: 20px 24px 24px;
-  overflow: hidden;
+  overflow: auto;
   min-height: 0;
   height: 100%;
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 10px;
+}
+
+.guest-preview-shell {
+  min-height: 0;
+  overflow: visible;
+}
+
+.guest-banner {
+  margin: 0;
+  min-height: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.guest-banner.error {
+  color: #d06a6a;
 }
 
 .guest-empty-state {

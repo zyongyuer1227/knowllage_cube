@@ -1,3 +1,5 @@
+import type { DocumentTaxonomyConfig } from "./document-taxonomy";
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "/api/v1";
 const UNAUTHORIZED_EVENT = "kc:unauthorized";
 
@@ -66,6 +68,18 @@ export type WelcomeDocumentPayload = {
   updatedAt: string;
 };
 
+export type PreviewWatermarkSettings = {
+  enabled: boolean;
+  mode: "view" | "export" | "both";
+  text: string;
+  color: string;
+  fontSize: number;
+  opacity: number;
+  rotate: number;
+  gapX: number;
+  gapY: number;
+};
+
 export const api = {
   login(payload: LoginPayload) {
     return request<{ token: string; user: { id: string; username: string; role: string } }>("/admin/auth/login", {
@@ -94,6 +108,9 @@ export const api = {
   publicDocument(id: string) {
     return request<Record<string, unknown>>(`/public/documents/${id}`);
   },
+  publicExportDocumentPdf(id: string) {
+    return request<Blob>(`/public/documents/${id}/export/pdf`);
+  },
   publicFolders() {
     return request<{ total: number; items: Array<Record<string, unknown>> }>("/public/search/folders");
   },
@@ -103,8 +120,30 @@ export const api = {
   getAdminWelcomeDocument(token: string) {
     return request<WelcomeDocumentPayload>("/system/admin/welcome-document", { token });
   },
+  getAdminDocumentTaxonomy(token: string) {
+    return request<DocumentTaxonomyConfig>("/system/admin/document-taxonomy", { token });
+  },
   updateAdminWelcomeDocument(payload: Record<string, unknown>, token: string) {
     return request<WelcomeDocumentPayload>("/system/admin/welcome-document", {
+      method: "PUT",
+      token,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  },
+  updateAdminDocumentTaxonomy(payload: DocumentTaxonomyConfig, token: string) {
+    return request<DocumentTaxonomyConfig>("/system/admin/document-taxonomy", {
+      method: "PUT",
+      token,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  },
+  getAdminPreviewWatermark(token: string) {
+    return request<PreviewWatermarkSettings>("/system/admin/preview-watermark", { token });
+  },
+  updateAdminPreviewWatermark(payload: PreviewWatermarkSettings, token: string) {
+    return request<PreviewWatermarkSettings>("/system/admin/preview-watermark", {
       method: "PUT",
       token,
       headers: { "Content-Type": "application/json" },
@@ -188,6 +227,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ changeNote })
     });
+  },
+  exportDocumentPdf(id: string, token: string) {
+    return request<Blob>(`/admin/documents/${id}/export/pdf`, { token });
   },
 };
 

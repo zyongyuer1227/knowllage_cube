@@ -9,6 +9,8 @@ import {
   Put,
   Query,
   Req,
+  Res,
+  StreamableFile,
   UploadedFiles,
   UploadedFile,
   UseInterceptors
@@ -59,7 +61,7 @@ export class DocumentController {
     if (byteLength <= 0 && !file.path) {
       throw new BadRequestException("Empty file");
     }
-    return this.documentService.uploadAndConvert(file, body, req.user?.sub);
+    return this.documentService.uploadAndConvert(file, this.normalizeUploadBody(body), req.user?.sub);
   }
 
   @Post("upload/batch")
@@ -72,7 +74,7 @@ export class DocumentController {
     if (!files || files.length === 0) {
       throw new BadRequestException("Missing files");
     }
-    return this.documentService.uploadBatch(files, body, req.user?.sub);
+    return this.documentService.uploadBatch(files, this.normalizeUploadBody(body), req.user?.sub);
   }
 
   @Post("format-text-import")
@@ -91,8 +93,18 @@ export class DocumentController {
   }
 
   @Get(":id")
-  getDocument(@Param("id") id: string) {
-    return this.documentService.getDocument(id);
+  getDocument(@Param("id") id: string, @Req() req: AuthRequest) {
+    return this.documentService.getDocument(id, req);
+  }
+
+  @Get(":id/export/pdf")
+  async exportDocumentPdf(@Param("id") id: string, @Req() req: AuthRequest, @Res({ passthrough: true }) res: any) {
+    const exported = await this.documentService.exportDocumentPdf(id, req);
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="${encodeURIComponent(exported.fileName)}"`
+    });
+    return new StreamableFile(exported.buffer);
   }
 
   @Put(":id")
@@ -132,5 +144,36 @@ export class DocumentController {
     @Req() req: AuthRequest
   ) {
     return this.documentService.rollbackToVersion(id, Number(versionNo), body.changeNote, req.user?.sub);
+  }
+
+  private normalizeUploadBody(body: UploadDocumentDto) {
+    const payload = body as UploadDocumentDto & Record<string, unknown>;
+    return {
+      ...body,
+      title: this.normalizeScalarValue(payload.title),
+      archivePath: this.normalizeScalarValue(payload.archivePath),
+      businessPath: this.normalizeArrayValue(payload.businessPath),
+      legalPath: this.normalizeArrayValue(payload.legalPath)
+    } satisfies UploadDocumentDto;
+  }
+
+  private normalizeScalarValue(value: unknown) {
+    if (Array.isArray(value)) {
+      const lastValue = value[value.length - 1];
+      return typeof lastValue === "string" ? lastValue : undefined;
+    }
+    return typeof value === "string" ? value : undefined;
+  }
+
+  private normalizeArrayValue(value: unknown) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean);
+    }
+    if (typeof value === "string" && value.trim()) {
+      return [value.trim()];
+    }
+    return undefined;
   }
 }

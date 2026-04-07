@@ -7,6 +7,11 @@ export interface JwtUserPayload {
 export interface AuthRequest {
   headers: {
     authorization?: string;
+    "x-forwarded-for"?: string;
+  };
+  ip?: string;
+  socket?: {
+    remoteAddress?: string;
   };
   user?: JwtUserPayload;
 }

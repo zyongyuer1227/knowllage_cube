@@ -1,9 +1,10 @@
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
 import GovDocPreview from "../components/GovDocPreview.vue";
 import WorkspaceTree from "../components/WorkspaceTree.vue";
 import { useAppSettings } from "../lib/app-settings";
 import { api } from "../lib/api";
+import { buildTaxonomyPaths } from "../lib/document-taxonomy";
 import { useAuthStore } from "../stores/auth";
 import { useWorkspaceStore } from "../stores/workspace";
 const auth = useAuthStore();
@@ -22,12 +23,39 @@ const formatStageLabel = ref("");
 const markdownTextarea = ref(null);
 const previewFrame = ref(null);
 const syncSource = ref(null);
-const settingsBackdropPressed = ref(false);
+const showAttributes = ref(false);
+const showTaxonomySettings = ref(false);
+const taxonomyBusy = ref(false);
+const taxonomyBusinessPathsText = ref("");
+const taxonomyLegalPathsText = ref("");
+const settingsDialogPosition = ref({ x: 0, y: 0 });
+const settingsDialogDragging = ref(false);
+const settingsDialogDragStart = ref({ x: 0, y: 0, pointerX: 0, pointerY: 0 });
+const defaultWatermarkSettings = {
+    enabled: true,
+    mode: "both",
+    text: "{{username}} {{timestamp}}\n{{documentTitle}}",
+    color: "#8b949e",
+    fontSize: 16,
+    opacity: 0.16,
+    rotate: -20,
+    gapX: 240,
+    gapY: 170
+};
 const settingsForm = ref({
     title: branding.title,
     subtitle: branding.subtitle,
     footer: branding.footer,
-    faviconHref: branding.faviconHref
+    faviconHref: branding.faviconHref,
+    watermarkEnabled: defaultWatermarkSettings.enabled,
+    watermarkMode: defaultWatermarkSettings.mode,
+    watermarkText: defaultWatermarkSettings.text,
+    watermarkColor: defaultWatermarkSettings.color,
+    watermarkFontSize: defaultWatermarkSettings.fontSize,
+    watermarkOpacity: defaultWatermarkSettings.opacity,
+    watermarkRotate: defaultWatermarkSettings.rotate,
+    watermarkGapX: defaultWatermarkSettings.gapX,
+    watermarkGapY: defaultWatermarkSettings.gapY
 });
 const loginForm = ref({
     username: "admin",
@@ -45,6 +73,12 @@ const treeKeys = computed(() => {
     walk(workspace.tree);
     return keys;
 });
+const businessLevel1Options = computed(() => workspace.getBusinessPathOptions([], 0));
+const businessLevel2Options = computed(() => workspace.getBusinessPathOptions(workspace.editorBusinessPath, 1));
+const businessLevel3Options = computed(() => workspace.getBusinessPathOptions(workspace.editorBusinessPath, 2));
+const legalLevel1Options = computed(() => workspace.getLegalPathOptions([], 0));
+const legalLevel2Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 1));
+const legalLevel3Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 2));
 function isFolderOpen(key) {
     return openFolders.value.includes(key);
 }
@@ -156,40 +190,167 @@ async function normalizeMarkdown() {
         }, 1000);
     }
 }
-function openSettings() {
+async function openSettings() {
+    resetSettingsDialogPosition();
     settingsForm.value = {
         title: branding.title,
         subtitle: branding.subtitle,
         footer: branding.footer,
-        faviconHref: branding.faviconHref
+        faviconHref: branding.faviconHref,
+        watermarkEnabled: defaultWatermarkSettings.enabled,
+        watermarkMode: defaultWatermarkSettings.mode,
+        watermarkText: defaultWatermarkSettings.text,
+        watermarkColor: defaultWatermarkSettings.color,
+        watermarkFontSize: defaultWatermarkSettings.fontSize,
+        watermarkOpacity: defaultWatermarkSettings.opacity,
+        watermarkRotate: defaultWatermarkSettings.rotate,
+        watermarkGapX: defaultWatermarkSettings.gapX,
+        watermarkGapY: defaultWatermarkSettings.gapY
     };
+    if (auth.token) {
+        try {
+            const watermark = await api.getAdminPreviewWatermark(auth.token);
+            settingsForm.value.watermarkEnabled = watermark.enabled;
+            settingsForm.value.watermarkMode = watermark.mode;
+            settingsForm.value.watermarkText = watermark.text;
+            settingsForm.value.watermarkColor = watermark.color;
+            settingsForm.value.watermarkFontSize = watermark.fontSize;
+            settingsForm.value.watermarkOpacity = watermark.opacity;
+            settingsForm.value.watermarkRotate = watermark.rotate;
+            settingsForm.value.watermarkGapX = watermark.gapX;
+            settingsForm.value.watermarkGapY = watermark.gapY;
+        }
+        catch (error) {
+            statusMessage.value = error instanceof Error ? error.message : "读取水印设置失败";
+        }
+    }
     showSettings.value = true;
+}
+function openAttributes() {
+    showAttributes.value = true;
+}
+function closeAttributes() {
+    showAttributes.value = false;
+}
+function openTaxonomySettings() {
+    taxonomyBusinessPathsText.value = buildTaxonomyPaths(workspace.documentTaxonomy.businessDomains).join("\n");
+    taxonomyLegalPathsText.value = buildTaxonomyPaths(workspace.documentTaxonomy.legalLevels).join("\n");
+    showTaxonomySettings.value = true;
+}
+function closeTaxonomySettings() {
+    showTaxonomySettings.value = false;
+}
+function buildTaxonomyTreeFromPaths(text) {
+    const root = [];
+    const lines = text
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    lines.forEach((line) => {
+        const parts = line.split("/").map((item) => item.trim()).filter(Boolean).slice(0, 3);
+        if (parts.length === 0) {
+            return;
+        }
+        let nodes = root;
+        parts.forEach((part) => {
+            let node = nodes.find((item) => item.name === part);
+            if (!node) {
+                node = { name: part, children: [] };
+                nodes.push(node);
+            }
+            nodes = node.children;
+        });
+    });
+    return root;
+}
+async function saveTaxonomySettings() {
+    if (!auth.token)
+        return;
+    taxonomyBusy.value = true;
+    try {
+        await workspace.saveDocumentTaxonomy(auth.token, {
+            businessDomains: buildTaxonomyTreeFromPaths(taxonomyBusinessPathsText.value),
+            legalLevels: buildTaxonomyTreeFromPaths(taxonomyLegalPathsText.value)
+        });
+        if (workspace.getBusinessPathOptions(workspace.editorBusinessPath, 0).length === 0) {
+            workspace.editorBusinessPath = [];
+        }
+        if (workspace.getLegalPathOptions(workspace.editorLegalPath, 0).length === 0) {
+            workspace.editorLegalPath = [];
+        }
+        statusMessage.value = "文档属性体系已更新";
+        showTaxonomySettings.value = false;
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "保存属性体系失败";
+    }
+    finally {
+        taxonomyBusy.value = false;
+    }
 }
 function closeSettings() {
     showSettings.value = false;
-    settingsBackdropPressed.value = false;
+    settingsDialogDragging.value = false;
+    settingsDialogPosition.value = { x: 0, y: 0 };
 }
 async function saveSettings() {
+    if (!auth.token)
+        return;
     settingsBusy.value = true;
     try {
         setBranding(settingsForm.value);
+        await api.updateAdminPreviewWatermark({
+            enabled: settingsForm.value.watermarkEnabled,
+            mode: settingsForm.value.watermarkMode,
+            text: settingsForm.value.watermarkText,
+            color: settingsForm.value.watermarkColor,
+            fontSize: settingsForm.value.watermarkFontSize,
+            opacity: settingsForm.value.watermarkOpacity,
+            rotate: settingsForm.value.watermarkRotate,
+            gapX: settingsForm.value.watermarkGapX,
+            gapY: settingsForm.value.watermarkGapY
+        }, auth.token);
+        await workspace.loadAdminWorkspace(auth.token);
         statusMessage.value = "参数设置已保存";
         showSettings.value = false;
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "保存参数设置失败";
     }
     finally {
         settingsBusy.value = false;
     }
 }
-function handleSettingsBackdropPointerDown() {
-    settingsBackdropPressed.value = true;
+function stopSettingsDrag() {
+    settingsDialogDragging.value = false;
 }
-function handleSettingsBackdropPointerUp() {
-    if (settingsBackdropPressed.value) {
-        closeSettings();
+function handleSettingsDragMove(event) {
+    if (!settingsDialogDragging.value) {
+        return;
     }
+    settingsDialogPosition.value = {
+        x: settingsDialogDragStart.value.x + event.clientX - settingsDialogDragStart.value.pointerX,
+        y: settingsDialogDragStart.value.y + event.clientY - settingsDialogDragStart.value.pointerY
+    };
 }
-function cancelSettingsBackdropClose() {
-    settingsBackdropPressed.value = false;
+function startSettingsDrag(event) {
+    if (window.innerWidth <= 1024) {
+        return;
+    }
+    const target = event.target;
+    if (target?.closest("button, input, label")) {
+        return;
+    }
+    settingsDialogDragging.value = true;
+    settingsDialogDragStart.value = {
+        x: settingsDialogPosition.value.x,
+        y: settingsDialogPosition.value.y,
+        pointerX: event.clientX,
+        pointerY: event.clientY
+    };
+}
+function resetSettingsDialogPosition() {
+    settingsDialogPosition.value = { x: 0, y: 0 };
 }
 function restoreSettings() {
     resetBranding();
@@ -197,7 +358,16 @@ function restoreSettings() {
         title: defaultBranding.title,
         subtitle: defaultBranding.subtitle,
         footer: defaultBranding.footer,
-        faviconHref: defaultBranding.faviconHref
+        faviconHref: defaultBranding.faviconHref,
+        watermarkEnabled: defaultWatermarkSettings.enabled,
+        watermarkMode: defaultWatermarkSettings.mode,
+        watermarkText: defaultWatermarkSettings.text,
+        watermarkColor: defaultWatermarkSettings.color,
+        watermarkFontSize: defaultWatermarkSettings.fontSize,
+        watermarkOpacity: defaultWatermarkSettings.opacity,
+        watermarkRotate: defaultWatermarkSettings.rotate,
+        watermarkGapX: defaultWatermarkSettings.gapX,
+        watermarkGapY: defaultWatermarkSettings.gapY
     };
     statusMessage.value = "已恢复默认参数";
 }
@@ -274,12 +444,19 @@ watch(() => workspace.activeId, async () => {
     await nextTick();
     setEditorScrollRatio(0);
     previewFrame.value?.setScrollRatio(0);
+    closeAttributes();
 });
 onMounted(async () => {
     workspace.ensureInitialized();
+    window.addEventListener("pointermove", handleSettingsDragMove);
+    window.addEventListener("pointerup", stopSettingsDrag);
     if (auth.token) {
         await workspace.loadAdminWorkspace(auth.token);
     }
+});
+onBeforeUnmount(() => {
+    window.removeEventListener("pointermove", handleSettingsDragMove);
+    window.removeEventListener("pointerup", stopSettingsDrag);
 });
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -297,9 +474,24 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['drag-chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form-compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form-compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['metric-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['metric-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['toggle-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['color-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-domain-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary-strong-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
@@ -311,6 +503,15 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['editor-fields']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-split']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-drag-handle']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-scroll']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions-sticky']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-columns']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-split']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
@@ -644,11 +845,13 @@ else {
             ...{ 'onScrollRatio': {} },
             ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
+            persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
         }));
         const __VLS_37 = __VLS_36({
             ...{ 'onScrollRatio': {} },
             ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
+            persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
         }, ...__VLS_functionalComponentArgsRest(__VLS_36));
         let __VLS_39;
         let __VLS_40;
@@ -706,6 +909,41 @@ else {
             fixedWidth: true,
         }, ...__VLS_functionalComponentArgsRest(__VLS_45));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "editor-actions" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.openTaxonomySettings) },
+            ...{ class: "save-btn secondary-btn" },
+            type: "button",
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_48 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "sitemap",
+            fixedWidth: true,
+        }));
+        const __VLS_49 = __VLS_48({
+            name: "sitemap",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (__VLS_ctx.openAttributes) },
+            ...{ class: "save-btn secondary-btn" },
+            type: "button",
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "tags",
+            fixedWidth: true,
+        }));
+        const __VLS_52 = __VLS_51({
+            name: "tags",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.saveCurrentDocument) },
             ...{ class: "save-btn" },
@@ -713,14 +951,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_48 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "floppy-disk",
             fixedWidth: true,
         }));
-        const __VLS_49 = __VLS_48({
+        const __VLS_55 = __VLS_54({
             name: "floppy-disk",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_54));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.workspace.saving ? "保存中..." : "保存源码");
     }
@@ -731,16 +969,13 @@ else {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
     }
 }
-if (__VLS_ctx.showSettings) {
+if (__VLS_ctx.showAttributes) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ onMousedown: (__VLS_ctx.handleSettingsBackdropPointerDown) },
-        ...{ onMouseup: (__VLS_ctx.handleSettingsBackdropPointerUp) },
+        ...{ onMousedown: (__VLS_ctx.closeAttributes) },
         ...{ class: "settings-backdrop" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-        ...{ onMousedown: (__VLS_ctx.cancelSettingsBackdropClose) },
-        ...{ onMouseup: (__VLS_ctx.cancelSettingsBackdropClose) },
-        ...{ class: "settings-dialog" },
+        ...{ class: "settings-dialog attribute-dialog" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
         ...{ class: "settings-header" },
@@ -751,22 +986,367 @@ if (__VLS_ctx.showSettings) {
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeAttributes) },
+        type: "button",
+        ...{ class: "icon-btn" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_57 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "xmark",
+        fixedWidth: true,
+    }));
+    const __VLS_58 = __VLS_57({
+        name: "xmark",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_57));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-form" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setBusinessPathLevel(0, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorBusinessPath[0] ?? ''),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.workspace.businessDomainOptions))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setBusinessPathLevel(1, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorBusinessPath[1] ?? ''),
+        disabled: (__VLS_ctx.businessLevel2Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.businessLevel2Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.businessLevel2Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setBusinessPathLevel(2, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorBusinessPath[2] ?? ''),
+        disabled: (__VLS_ctx.businessLevel3Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.businessLevel3Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.businessLevel3Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setLegalPathLevel(0, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorLegalPath[0] ?? ''),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.workspace.legalLevelOptions))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setLegalPathLevel(1, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorLegalPath[1] ?? ''),
+        disabled: (__VLS_ctx.legalLevel2Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.legalLevel2Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.legalLevel2Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "attribute-wide" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.showAttributes))
+                    return;
+                __VLS_ctx.workspace.setLegalPathLevel(2, $event.target.value);
+            } },
+        value: (__VLS_ctx.workspace.editorLegalPath[2] ?? ''),
+        disabled: (__VLS_ctx.legalLevel3Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.legalLevel3Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.legalLevel3Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+        ...{ class: "settings-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "attribute-summary" },
+    });
+    (__VLS_ctx.workspace.editorBusinessPath.join(" / ") || "未设置业务领域");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.br)({});
+    (__VLS_ctx.workspace.editorLegalPath.join(" / ") || "未设置效力层级");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-submit" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeAttributes) },
+        type: "button",
+        ...{ class: "save-btn secondary-btn" },
+    });
+}
+if (__VLS_ctx.showTaxonomySettings) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onMousedown: (__VLS_ctx.closeTaxonomySettings) },
+        ...{ class: "settings-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-dialog taxonomy-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
+        ...{ class: "settings-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "panel-eyebrow" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeTaxonomySettings) },
+        type: "button",
+        ...{ class: "icon-btn" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_60 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "xmark",
+        fixedWidth: true,
+    }));
+    const __VLS_61 = __VLS_60({
+        name: "xmark",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_60));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "taxonomy-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "taxonomy-panel" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "taxonomy-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.taxonomyBusinessPathsText),
+        rows: "18",
+        placeholder: "如&#10;道路运输&#10;道路运输/道路旅客运输&#10;道路运输/道路旅客运输/班线客运",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "taxonomy-panel" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "taxonomy-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.taxonomyLegalPathsText),
+        rows: "18",
+        placeholder: "如&#10;法律&#10;行政法规&#10;行政法规/交通运输",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+        ...{ class: "settings-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "attribute-summary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-submit" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeTaxonomySettings) },
+        type: "button",
+        ...{ class: "save-btn secondary-btn" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveTaxonomySettings) },
+        type: "button",
+        ...{ class: "save-btn" },
+        disabled: (__VLS_ctx.taxonomyBusy),
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_63 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "floppy-disk",
+        fixedWidth: true,
+    }));
+    const __VLS_64 = __VLS_63({
+        name: "floppy-disk",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_63));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.taxonomyBusy ? "保存中..." : "保存属性体系");
+}
+if (__VLS_ctx.showSettings) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ onClick: (__VLS_ctx.closeSettings) },
+        ...{ class: "settings-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-dialog settings-dialog-elevated" },
+        ...{ class: ({ dragging: __VLS_ctx.settingsDialogDragging }) },
+        ...{ style: ({ transform: `translate(${__VLS_ctx.settingsDialogPosition.x}px, ${__VLS_ctx.settingsDialogPosition.y}px)` }) },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
+        ...{ onPointerdown: (__VLS_ctx.startSettingsDrag) },
+        ...{ class: "settings-header settings-drag-handle" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-header-copy" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "panel-eyebrow" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "settings-header-desc" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-header-tools" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.resetSettingsDialogPosition) },
+        type: "button",
+        ...{ class: "drag-chip" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_66 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "arrows-up-down-left-right",
+        fixedWidth: true,
+    }));
+    const __VLS_67 = __VLS_66({
+        name: "arrows-up-down-left-right",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_66));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.closeSettings) },
         type: "button",
         ...{ class: "icon-btn" },
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_69 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "xmark",
         fixedWidth: true,
     }));
-    const __VLS_52 = __VLS_51({
+    const __VLS_70 = __VLS_69({
         name: "xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_69));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "settings-form" },
+        ...{ class: "settings-scroll" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-layout settings-layout-polished" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-hero" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "panel-eyebrow" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-hero-metrics" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "metric-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    (__VLS_ctx.settingsForm.watermarkEnabled ? "已启用" : "未启用");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "metric-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    (__VLS_ctx.settingsForm.watermarkFontSize);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-columns" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-block settings-block-primary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-block-head" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-form settings-form-compact" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
@@ -776,33 +1356,145 @@ if (__VLS_ctx.showSettings) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({});
     (__VLS_ctx.settingsForm.subtitle);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-wide" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({});
     (__VLS_ctx.settingsForm.footer);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-wide" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         placeholder: "/favicon.ico 或 data:image/x-icon...",
     });
     (__VLS_ctx.settingsForm.faviconHref);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-wide" },
+    });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
         ...{ onChange: (__VLS_ctx.handleFaviconChange) },
         type: "file",
         accept: ".ico,image/x-icon,image/png,image/svg+xml",
     });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-block settings-block-primary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-block-head" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-form settings-form-compact" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "toggle-field settings-wide" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "checkbox",
+    });
+    (__VLS_ctx.settingsForm.watermarkEnabled);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        value: (__VLS_ctx.settingsForm.watermarkMode),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "both",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "view",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "export",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-wide" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.textarea, __VLS_intrinsicElements.textarea)({
+        value: (__VLS_ctx.settingsForm.watermarkText),
+        rows: "4",
+        placeholder: "如：{{username}} {{timestamp}}&#10;{{documentTitle}}&#10;{{ip}}",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "settings-wide" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "color-field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "color",
+    });
+    (__VLS_ctx.settingsForm.watermarkColor);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        placeholder: "#8b949e",
+    });
+    (__VLS_ctx.settingsForm.watermarkColor);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "12",
+        max: "36",
+    });
+    (__VLS_ctx.settingsForm.watermarkFontSize);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "0.05",
+        max: "0.4",
+        step: "0.01",
+    });
+    (__VLS_ctx.settingsForm.watermarkOpacity);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "-45",
+        max: "45",
+    });
+    (__VLS_ctx.settingsForm.watermarkRotate);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "120",
+        max: "360",
+        step: "10",
+    });
+    (__VLS_ctx.settingsForm.watermarkGapX);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        type: "number",
+        min: "100",
+        max: "300",
+        step: "10",
+    });
+    (__VLS_ctx.settingsForm.watermarkGapY);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
-        ...{ class: "settings-actions" },
+        ...{ class: "settings-actions settings-actions-sticky" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-actions-meta" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-submit" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.restoreSettings) },
         type: "button",
         ...{ class: "save-btn secondary-btn" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "settings-submit" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.closeSettings) },
@@ -812,21 +1504,21 @@ if (__VLS_ctx.showSettings) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.saveSettings) },
         type: "button",
-        ...{ class: "save-btn" },
+        ...{ class: "save-btn primary-strong-btn" },
         disabled: (__VLS_ctx.settingsBusy),
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_72 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "floppy-disk",
         fixedWidth: true,
     }));
-    const __VLS_55 = __VLS_54({
+    const __VLS_73 = __VLS_72({
         name: "floppy-disk",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_54));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_72));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    (__VLS_ctx.settingsBusy ? "保存中..." : "保存设置");
+    (__VLS_ctx.settingsBusy ? "保存中..." : "确定并保存");
 }
 /** @type {__VLS_StyleScopedClasses['workspace-admin']} */ ;
 /** @type {__VLS_StyleScopedClasses['login-shell']} */ ;
@@ -874,21 +1566,91 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['action-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['editor-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-backdrop']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['attribute-dialog']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
 /** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['attribute-wide']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['attribute-summary']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['taxonomy-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['attribute-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog-elevated']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-drag-handle']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header-desc']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header-tools']} */ ;
+/** @type {__VLS_StyleScopedClasses['drag-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-scroll']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-layout']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-layout-polished']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-hero-metrics']} */ ;
+/** @type {__VLS_StyleScopedClasses['metric-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['metric-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-columns']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form-compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-primary']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-block-head']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-form-compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['toggle-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['color-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions-sticky']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions-meta']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary-strong-btn']} */ ;
 // @ts-ignore
 var __VLS_44 = __VLS_43;
 var __VLS_dollars;
@@ -912,8 +1674,19 @@ const __VLS_self = (await import('vue')).defineComponent({
             formatStageLabel: formatStageLabel,
             markdownTextarea: markdownTextarea,
             previewFrame: previewFrame,
+            showAttributes: showAttributes,
+            showTaxonomySettings: showTaxonomySettings,
+            taxonomyBusy: taxonomyBusy,
+            taxonomyBusinessPathsText: taxonomyBusinessPathsText,
+            taxonomyLegalPathsText: taxonomyLegalPathsText,
+            settingsDialogPosition: settingsDialogPosition,
+            settingsDialogDragging: settingsDialogDragging,
             settingsForm: settingsForm,
             loginForm: loginForm,
+            businessLevel2Options: businessLevel2Options,
+            businessLevel3Options: businessLevel3Options,
+            legalLevel2Options: legalLevel2Options,
+            legalLevel3Options: legalLevel3Options,
             toggleFolder: toggleFolder,
             selectedCount: selectedCount,
             toggleDocumentSelection: toggleDocumentSelection,
@@ -924,11 +1697,15 @@ const __VLS_self = (await import('vue')).defineComponent({
             saveCurrentDocument: saveCurrentDocument,
             normalizeMarkdown: normalizeMarkdown,
             openSettings: openSettings,
+            openAttributes: openAttributes,
+            closeAttributes: closeAttributes,
+            openTaxonomySettings: openTaxonomySettings,
+            closeTaxonomySettings: closeTaxonomySettings,
+            saveTaxonomySettings: saveTaxonomySettings,
             closeSettings: closeSettings,
             saveSettings: saveSettings,
-            handleSettingsBackdropPointerDown: handleSettingsBackdropPointerDown,
-            handleSettingsBackdropPointerUp: handleSettingsBackdropPointerUp,
-            cancelSettingsBackdropClose: cancelSettingsBackdropClose,
+            startSettingsDrag: startSettingsDrag,
+            resetSettingsDialogPosition: resetSettingsDialogPosition,
             restoreSettings: restoreSettings,
             handleFaviconChange: handleFaviconChange,
             deleteDocument: deleteDocument,

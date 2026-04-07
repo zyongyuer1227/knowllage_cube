@@ -1,6 +1,11 @@
 import { promises as fs } from "fs";
 import { resolve } from "path";
 import { marked } from "marked";
+import {
+  buildPreviewWatermarkPayload,
+  readPreviewWatermarkSettings,
+  type PreviewWatermarkRenderContext
+} from "./preview-watermark.util";
 
 type PreviewAssets = {
   fontCss: string;
@@ -61,31 +66,31 @@ async function loadPreviewAssets(): Promise<PreviewAssets> {
 @font-face {
   font-family: "FangSong";
   src: url("${fangSongUrl}") format("truetype");
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
   font-family: "KaiTi";
   src: url("${kaiTiUrl}") format("truetype");
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
   font-family: "SimHei";
   src: url("${simHeiUrl}") format("truetype");
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
   font-family: "FZXBSJW";
   src: url("${xiaoBiaoSongUrl}") format("truetype");
-  font-display: swap;
+  font-display: block;
 }
 
 @font-face {
   font-family: "FZXiaoBiaoSong-B05S";
   src: url("${xiaoBiaoSongUrl}") format("truetype");
-  font-display: swap;
+  font-display: block;
 }
 `,
         govDocCss: govDocCssSource.replace(/@import\s+url\((['"])\.\/font\.css\1\);?/gi, "")
@@ -96,8 +101,21 @@ async function loadPreviewAssets(): Promise<PreviewAssets> {
   return cachedAssetsPromise;
 }
 
-export async function renderPersistedPreviewHtml(source: string) {
+export async function renderPersistedPreviewHtml(
+  source: string,
+  context: PreviewWatermarkRenderContext = {
+    scope: "view",
+    profile: "screen",
+    source: "system"
+  }
+) {
   const { fontCss, govDocCss } = await loadPreviewAssets();
+  const profile = context.profile ?? (context.scope === "export" ? "export" : "screen");
+  const watermarkSettings = await readPreviewWatermarkSettings();
+  const watermark = buildPreviewWatermarkPayload(watermarkSettings, {
+    timestamp: new Date().toISOString(),
+    ...context
+  });
   const rendered = normalizePreviewMarkup(normalizeImageMarkup(marked.parse(preprocessMarkdownSource(source ?? "")) as string));
 
   return `<!doctype html>
@@ -113,13 +131,15 @@ ${govDocCss}
     </style>
     <style>
       html {
-        background: #eef1f4;
+        background: ${profile === "screen" ? "#eef1f4" : "#e6eaef"};
       }
 
       body {
         box-sizing: border-box;
-        min-height: 100vh;
-        padding: 24px 32px 40px;
+        min-height: ${profile === "screen" ? "100vh" : "auto"};
+        padding: ${profile === "screen" ? "24px 32px 40px" : profile === "print-preview" ? "18px 0 24px" : "0"};
+        background: #ffffff;
+        ${profile === "print-preview" ? "box-shadow: 0 8px 30px rgba(15, 23, 42, 0.08);" : ""}
       }
 
       img {
@@ -142,9 +162,11 @@ ${govDocCss}
         padding: 0;
         border: 0;
       }
+${watermark.style}
     </style>
   </head>
   <body>
+${watermark.htmlOverlay}
 ${rendered}
   </body>
 </html>`;

@@ -3,9 +3,12 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { QueryFailedError, Repository } from "typeorm";
+import { AuthRequest } from "../../common/auth/auth-request.interface";
+import { renderPersistedPreviewHtml } from "../document/document-preview.util";
 import { DocumentContentEntity } from "../document/entities/document-content.entity";
 import { DocumentEntity } from "../document/entities/document.entity";
 import { DocumentFolderEntity } from "../document/entities/document-folder.entity";
+import { type PreviewWatermarkRenderContext } from "../document/preview-watermark.util";
 import { SearchQueryDto } from "./dto/search-query.dto";
 
 @Injectable()
@@ -86,13 +89,18 @@ export class SearchService {
         id: row.id,
         title: row.title,
         archivePath: row.archivePath,
+        businessDomain: row.businessDomain,
+        businessSubdomain: row.businessSubdomain,
+        businessPath: row.businessPath,
+        legalLevel: row.legalLevel,
+        legalPath: row.legalPath,
         updatedAt: row.updatedAt
       }))
     };
     return response;
   }
 
-  async getDocumentPreview(id: string) {
+  async getDocumentPreview(id: string, req?: AuthRequest) {
     const document = await this.documentRepository.findOne({ where: { id } });
     if (!document) {
       throw new NotFoundException("Document not found");
@@ -108,9 +116,21 @@ export class SearchService {
       id: document.id,
       title: document.title,
       archivePath: document.archivePath,
+      businessDomain: document.businessDomain,
+      businessSubdomain: document.businessSubdomain,
+      businessPath: document.businessPath,
+      legalLevel: document.legalLevel,
+      legalPath: document.legalPath,
       markdownContent: content.markdownContent,
       rawText: await this.readTextFile(join(this.documentsRoot, id, "content.txt")),
-      previewHtml: await this.readTextFile(join(this.documentsRoot, id, "preview.html"))
+      previewHtml: await renderPersistedPreviewHtml(
+        content.markdownContent,
+        this.buildWatermarkContext("public", req, {
+          id: document.id,
+          title: document.title,
+          archivePath: document.archivePath
+        }, "print-preview")
+      )
     };
   }
 
@@ -188,5 +208,28 @@ export class SearchService {
     } catch {
       return null;
     }
+  }
+
+  private buildWatermarkContext(
+    source: PreviewWatermarkRenderContext["source"],
+    req: AuthRequest | undefined,
+    document?: { id?: string | null; title?: string | null; archivePath?: string | null },
+    profile: PreviewWatermarkRenderContext["profile"] = "screen"
+  ): PreviewWatermarkRenderContext {
+    const forwardedFor = req?.headers?.["x-forwarded-for"];
+    const ip = typeof forwardedFor === "string" && forwardedFor.trim()
+      ? forwardedFor.split(",")[0].trim()
+      : req?.ip || req?.socket?.remoteAddress || null;
+
+    return {
+      scope: "view",
+      profile,
+      source,
+      username: req?.user?.username ?? null,
+      role: req?.user?.role ?? null,
+      ip,
+      timestamp: new Date().toISOString(),
+      document: document ?? null
+    };
   }
 }

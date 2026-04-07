@@ -29,7 +29,7 @@ const dragTargetKey = ref("");
 
 function matchesDocument(doc: WorkspaceDoc) {
   if (!keyword.value) return true;
-  const haystack = `${doc.title} ${doc.archivePath}`.toLowerCase();
+  const haystack = `${doc.title} ${doc.archivePath} ${doc.businessPath.join(" ")} ${doc.legalPath.join(" ")}`.toLowerCase();
   return haystack.includes(keyword.value);
 }
 
@@ -105,6 +105,8 @@ function handleDrop(event: DragEvent, targetPath: string) {
       id: docId,
       title: event.dataTransfer?.getData("application/x-knowledge-doc-title") || "",
       archivePath: event.dataTransfer?.getData("application/x-knowledge-doc-path") || "",
+      businessPath: [],
+      legalPath: [],
       markdownSource: ""
     } satisfies WorkspaceDoc;
     emit("move", { doc, targetPath });

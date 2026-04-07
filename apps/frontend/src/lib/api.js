@@ -51,6 +51,9 @@ export const api = {
     publicDocument(id) {
         return request(`/public/documents/${id}`);
     },
+    publicExportDocumentPdf(id) {
+        return request(`/public/documents/${id}/export/pdf`);
+    },
     publicFolders() {
         return request("/public/search/folders");
     },
@@ -60,8 +63,30 @@ export const api = {
     getAdminWelcomeDocument(token) {
         return request("/system/admin/welcome-document", { token });
     },
+    getAdminDocumentTaxonomy(token) {
+        return request("/system/admin/document-taxonomy", { token });
+    },
     updateAdminWelcomeDocument(payload, token) {
         return request("/system/admin/welcome-document", {
+            method: "PUT",
+            token,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    },
+    updateAdminDocumentTaxonomy(payload, token) {
+        return request("/system/admin/document-taxonomy", {
+            method: "PUT",
+            token,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+    },
+    getAdminPreviewWatermark(token) {
+        return request("/system/admin/preview-watermark", { token });
+    },
+    updateAdminPreviewWatermark(payload, token) {
+        return request("/system/admin/preview-watermark", {
             method: "PUT",
             token,
             headers: { "Content-Type": "application/json" },
@@ -142,6 +167,9 @@ export const api = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ changeNote })
         });
+    },
+    exportDocumentPdf(id, token) {
+        return request(`/admin/documents/${id}/export/pdf`, { token });
     },
 };
 export { API_BASE_URL };

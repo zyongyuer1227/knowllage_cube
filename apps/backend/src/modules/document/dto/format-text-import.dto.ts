@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
+import { IsArray, IsNotEmpty, IsOptional, IsString, MaxLength } from "class-validator";
 
 export class FormatTextImportDto {
   @IsOptional()
@@ -18,4 +18,16 @@ export class FormatTextImportDto {
   @IsString()
   @MaxLength(500)
   archivePath?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  businessPath?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  legalPath?: string[];
 }

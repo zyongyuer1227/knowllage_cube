@@ -8,6 +8,7 @@ import xiaoBiaoSongUrl from "../../../../static/fonts/FZXBSJW.TTF?url";
 const props = defineProps();
 const emit = defineEmits();
 const frame = ref(null);
+const frameHeight = ref(720);
 let frameScrollTicking = false;
 let pendingScrollRatio = 0;
 marked.setOptions({
@@ -153,22 +154,38 @@ function handleLoad() {
     const frameWindow = frame.value?.contentWindow;
     frameWindow?.removeEventListener("scroll", handleFrameScroll);
     frameWindow?.addEventListener("scroll", handleFrameScroll, { passive: true });
+    syncFrameHeight();
     setScrollRatio(pendingScrollRatio);
 }
+function syncFrameHeight() {
+    if (!props.autoHeight) {
+        return;
+    }
+    requestAnimationFrame(() => {
+        const scrollRoot = getFrameScrollRoot();
+        if (!scrollRoot)
+            return;
+        frameHeight.value = Math.max(scrollRoot.scrollHeight, 720);
+    });
+}
 const __VLS_exposed = {
-    setScrollRatio
+    setScrollRatio,
+    syncFrameHeight
 };
 defineExpose(__VLS_exposed);
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
+/** @type {__VLS_StyleScopedClasses['gov-doc-preview']} */ ;
 // CSS variable injection 
 // CSS variable injection end 
 __VLS_asFunctionalElement(__VLS_intrinsicElements.iframe, __VLS_intrinsicElements.iframe)({
     ...{ onLoad: (__VLS_ctx.handleLoad) },
     ref: "frame",
     ...{ class: "gov-doc-preview" },
+    ...{ class: ({ 'auto-height': __VLS_ctx.autoHeight }) },
+    ...{ style: (__VLS_ctx.autoHeight ? { height: `${__VLS_ctx.frameHeight}px` } : undefined) },
     srcdoc: (__VLS_ctx.srcdoc),
     title: "公文 HTML 预览",
 });
@@ -179,6 +196,7 @@ const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             frame: frame,
+            frameHeight: frameHeight,
             srcdoc: srcdoc,
             handleLoad: handleLoad,
         };

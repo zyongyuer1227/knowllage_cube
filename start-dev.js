@@ -243,6 +243,23 @@ async function runHealthChecks() {
   }
 }
 
+async function waitForBackendReady(timeoutMs = 30000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const backend = await request("http://127.0.0.1:3000/api/v1/system/health");
+      if (backend.statusCode >= 200 && backend.statusCode < 500) {
+        writeStep(`Backend is ready: HTTP ${backend.statusCode}`);
+        return;
+      }
+    } catch {
+      // Keep polling until timeout.
+    }
+    await sleep(500);
+  }
+  throw new Error(`Backend did not become ready within ${timeoutMs}ms. See ${backendErrLog}`);
+}
+
 async function main() {
   if (!fs.existsSync(nodeModules)) {
     throw new Error("node_modules not found. Run 'npm install' first.");
@@ -257,6 +274,8 @@ async function main() {
   runCommand("Running database migrations...", ["--workspace", "apps/backend", "run", "db:migrate"]);
 
   const backend = startService("backend", "dev:backend", backendOutLog, backendErrLog);
+  writeStep("Waiting for backend to become ready before starting frontend...");
+  await waitForBackendReady();
   const frontend = startService("frontend", "dev:frontend", frontendOutLog, frontendErrLog);
 
   process.on("SIGINT", () => {
@@ -271,7 +290,7 @@ async function main() {
   });
 
   writeStep("Waiting for services to become ready...");
-  await sleep(6000);
+  await sleep(1500);
   await runHealthChecks();
 
   process.stdout.write("\n");

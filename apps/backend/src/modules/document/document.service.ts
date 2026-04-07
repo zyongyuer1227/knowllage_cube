@@ -5,18 +5,23 @@ import { promises as fs } from "fs";
 import { tmpdir } from "os";
 import { basename, join, resolve } from "path";
 import { promisify } from "util";
+import { chromium, type Page } from "playwright-core";
 import { QueryFailedError, Repository } from "typeorm";
+import { AuthRequest } from "../../common/auth/auth-request.interface";
 import { UpdateDocumentDto } from "./dto/update-document.dto";
 import { FormatTextImportDto } from "./dto/format-text-import.dto";
 import { UploadDocumentDto } from "./dto/upload-document.dto";
 import { UpdateDocumentContentDto } from "./dto/update-document-content.dto";
 import { AuditService } from "../audit/audit.service";
+import { SystemService } from "../system/system.service";
 import { DocumentContentEntity } from "./entities/document-content.entity";
 import { DocumentFolderEntity } from "./entities/document-folder.entity";
 import { DocumentConversionTaskEntity } from "./entities/document-conversion-task.entity";
 import { DocumentEntity } from "./entities/document.entity";
 import { DocumentVersionEntity } from "./entities/document-version.entity";
 import { renderPersistedPreviewHtml } from "./document-preview.util";
+import { type DocumentAttributeInput, type DocumentTaxonomyNode } from "./document-taxonomy";
+import { type PreviewWatermarkRenderContext } from "./preview-watermark.util";
 
 @Injectable()
 export class DocumentService implements OnModuleInit {
@@ -39,7 +44,8 @@ export class DocumentService implements OnModuleInit {
     private readonly taskRepository: Repository<DocumentConversionTaskEntity>,
     @InjectRepository(DocumentVersionEntity)
     private readonly versionRepository: Repository<DocumentVersionEntity>,
-    private readonly auditService: AuditService
+    private readonly auditService: AuditService,
+    private readonly systemService: SystemService
   ) {}
 
   async onModuleInit() {
@@ -116,10 +122,11 @@ export class DocumentService implements OnModuleInit {
     body: UploadDocumentDto,
     operatorId?: number
   ) {
-    const normalizedTitle = this.normalizeMultipartText(body.title);
+    const requestedTitle = this.normalizeMultipartText(body.title || file.originalname.replace(/\.[^.]+$/, ""));
     const normalizedArchivePath = body.archivePath ? this.normalizeMultipartText(body.archivePath) : null;
     const normalizedOriginalName = this.normalizeMultipartText(file.originalname);
-    await this.ensureTitleAvailable(normalizedTitle);
+    const attributes = await this.normalizeDocumentAttributes(body);
+    const normalizedTitle = await this.resolveAvailableTitle(requestedTitle);
     const ext = this.normalizeExt(normalizedOriginalName);
     if (!this.supportedExt.has(ext)) {
       throw new BadRequestException(`Unsupported file type: ${ext}`);
@@ -130,6 +137,11 @@ export class DocumentService implements OnModuleInit {
       this.documentRepository.create({
         title: normalizedTitle,
         archivePath: normalizedArchivePath ? this.normalizeFolderPath(normalizedArchivePath) : null,
+        businessDomain: attributes.businessPath[0] ?? null,
+        businessSubdomain: attributes.businessPath[1] ?? null,
+        businessPath: attributes.businessPath,
+        legalLevel: attributes.legalPath[0] ?? null,
+        legalPath: attributes.legalPath
       })
     );
 
@@ -146,6 +158,9 @@ export class DocumentService implements OnModuleInit {
       })
     );
     await this.logDocOperation(operatorId, "document.upload", document.id, {
+      requestedTitle,
+      resolvedTitle: normalizedTitle,
+      ...attributes,
       sourceFilename: normalizedOriginalName,
       sourceExt: ext,
       taskId: task.id
@@ -155,6 +170,8 @@ export class DocumentService implements OnModuleInit {
 
     return {
       documentId: document.id,
+      title: normalizedTitle,
+      ...attributes,
       taskId: task.id,
       taskStatus: task.status,
       errorMessage: task.errorMessage
@@ -193,16 +210,20 @@ export class DocumentService implements OnModuleInit {
   }
 
   async formatTextAndImport(body: FormatTextImportDto, operatorId?: number) {
-    const normalizedTitle = this.normalizeMultipartText(body.title).trim();
+    const requestedTitle = this.normalizeMultipartText(body.title).trim();
     const normalizedArchivePath = body.archivePath ? this.normalizeMultipartText(body.archivePath) : null;
+    const attributes = await this.normalizeDocumentAttributes(body);
     const rawText = body.text?.trim();
     const documentId = body.documentId?.trim() || "";
-    if (!normalizedTitle) {
+    if (!requestedTitle) {
       throw new BadRequestException("Title is required");
     }
     if (!rawText) {
       throw new BadRequestException("Text content is empty");
     }
+    const normalizedTitle = documentId
+      ? await this.resolveAvailableTitle(requestedTitle, documentId)
+      : await this.resolveAvailableTitle(requestedTitle);
     const markdownLikeText = await this.runTextToMarkdownScript(rawText);
     const normalizedMarkdown = this.ensureMarkdownTitle(normalizedTitle, markdownLikeText);
 
@@ -211,9 +232,13 @@ export class DocumentService implements OnModuleInit {
       if (!document) {
         throw new NotFoundException("Document not found");
       }
-      await this.ensureTitleAvailable(normalizedTitle, documentId);
       document.title = normalizedTitle;
       document.archivePath = normalizedArchivePath ? this.normalizeFolderPath(normalizedArchivePath) : null;
+      document.businessDomain = attributes.businessPath[0] ?? null;
+      document.businessSubdomain = attributes.businessPath[1] ?? null;
+      document.businessPath = attributes.businessPath;
+      document.legalLevel = attributes.legalPath[0] ?? null;
+      document.legalPath = attributes.legalPath;
       await this.documentRepository.save(document);
 
       await this.contentRepository.delete({ documentId });
@@ -228,16 +253,20 @@ export class DocumentService implements OnModuleInit {
       const version = await this.createVersionSnapshot(documentId, operatorId, "Formatted with AI from editor text");
       await this.syncDocumentAssets(documentId);
       await this.logDocOperation(operatorId, "document.ai_format_update", documentId, {
+        requestedTitle,
+        resolvedTitle: normalizedTitle,
+        ...attributes,
         currentVersion: version.versionNo
       });
       return {
         documentId,
+        title: normalizedTitle,
+        ...attributes,
         updated: true,
         currentVersion: version.versionNo
       };
     }
 
-    await this.ensureTitleAvailable(normalizedTitle);
     const fileBuffer = Buffer.from(normalizedMarkdown, "utf-8");
 
     return this.uploadAndConvert(
@@ -248,7 +277,9 @@ export class DocumentService implements OnModuleInit {
       },
       {
         title: normalizedTitle,
-        archivePath: normalizedArchivePath ?? undefined
+        archivePath: normalizedArchivePath ?? undefined,
+        businessPath: attributes.businessPath.length > 0 ? attributes.businessPath : undefined,
+        legalPath: attributes.legalPath.length > 0 ? attributes.legalPath : undefined
       },
       operatorId
     );
@@ -295,7 +326,7 @@ export class DocumentService implements OnModuleInit {
     });
   }
 
-  async getDocument(id: string) {
+  async getDocument(id: string, req?: AuthRequest) {
     const document = await this.documentRepository.findOne({ where: { id } });
     if (!document) {
       throw new NotFoundException("Document not found");
@@ -308,9 +339,84 @@ export class DocumentService implements OnModuleInit {
       ...document,
       markdownContent: content?.markdownContent ?? null,
       rawText: await this.readTextFile(this.getDocumentAssetPaths(id).rawTextPath),
-      previewHtml: await this.readTextFile(this.getDocumentAssetPaths(id).previewHtmlPath),
+      previewHtml: content?.markdownContent
+        ? await renderPersistedPreviewHtml(
+            content.markdownContent,
+            this.buildWatermarkContext("admin", req, {
+              id: document.id,
+              title: document.title,
+              archivePath: document.archivePath
+            }, "view", "screen")
+          )
+        : null,
       persistedAssets: await this.getPersistedAssetDescriptor(id)
     };
+  }
+
+  async exportDocumentPdf(id: string, req?: AuthRequest) {
+    return this.exportDocumentPdfForSource(id, "admin", req);
+  }
+
+  async exportPublicDocumentPdf(id: string, req?: AuthRequest) {
+    return this.exportDocumentPdfForSource(id, "public", req);
+  }
+
+  private async exportDocumentPdfForSource(
+    id: string,
+    source: PreviewWatermarkRenderContext["source"],
+    req?: AuthRequest
+  ) {
+    const document = await this.documentRepository.findOne({ where: { id } });
+    if (!document) {
+      throw new NotFoundException("Document not found");
+    }
+    const content = await this.contentRepository.findOne({
+      where: { documentId: id },
+      order: { createdAt: "DESC" }
+    });
+    if (!content?.markdownContent) {
+      throw new NotFoundException("Document content not found");
+    }
+
+    const html = await renderPersistedPreviewHtml(
+      content.markdownContent,
+      this.buildWatermarkContext(source, req, {
+        id: document.id,
+        title: document.title,
+        archivePath: document.archivePath
+      }, "export", "export")
+    );
+    const executablePath = await this.resolvePdfBrowserExecutablePath();
+    const browser = await chromium.launch({
+      executablePath,
+      headless: true
+    });
+
+    try {
+      const page = await browser.newPage();
+      await page.emulateMedia({ media: "print" });
+      await page.setContent(html, { waitUntil: "networkidle" });
+      await this.waitForPdfPageReady(page);
+      const pdf = await page.pdf({
+        format: "A4",
+        preferCSSPageSize: true,
+        scale: 1,
+        printBackground: true,
+        margin: {
+          top: "0",
+          right: "0",
+          bottom: "0",
+          left: "0"
+        }
+      });
+
+      return {
+        fileName: `${this.sanitizeDownloadFilename(document.title || `document-${id}`)}.pdf`,
+        buffer: pdf
+      };
+    } finally {
+      await browser.close();
+    }
   }
 
   async updateDocument(id: string, body: UpdateDocumentDto, operatorId?: number) {
@@ -323,8 +429,18 @@ export class DocumentService implements OnModuleInit {
       document.archivePath = body.archivePath || null;
     }
     if (body.title !== undefined) {
-      await this.ensureTitleAvailable(body.title, id);
-      document.title = body.title;
+      document.title = await this.resolveAvailableTitle(body.title, id);
+    }
+    if (body.businessPath !== undefined || body.legalPath !== undefined) {
+      const attributes = await this.normalizeDocumentAttributes({
+        businessPath: body.businessPath !== undefined ? body.businessPath : document.businessPath,
+        legalPath: body.legalPath !== undefined ? body.legalPath : document.legalPath
+      });
+      document.businessDomain = attributes.businessPath[0] ?? null;
+      document.businessSubdomain = attributes.businessPath[1] ?? null;
+      document.businessPath = attributes.businessPath;
+      document.legalLevel = attributes.legalPath[0] ?? null;
+      document.legalPath = attributes.legalPath;
     }
     await this.documentRepository.save(document);
     await this.tryCreateVersionSnapshot(id, operatorId, "Metadata update");
@@ -898,6 +1014,47 @@ export class DocumentService implements OnModuleInit {
     return normalized;
   }
 
+  private async normalizeDocumentAttributes(input: DocumentAttributeInput) {
+    const taxonomy = await this.systemService.getAdminDocumentTaxonomy();
+    const businessPath = this.normalizeAttributePath(input.businessPath, taxonomy.businessDomains, "business");
+    const legalPath = this.normalizeAttributePath(input.legalPath, taxonomy.legalLevels, "legal");
+
+    return {
+      businessPath,
+      legalPath
+    };
+  }
+
+  private normalizeAttributePath(
+    pathInput: string[] | null | undefined,
+    roots: DocumentTaxonomyNode[],
+    label: string
+  ) {
+    if (!Array.isArray(pathInput) || pathInput.length === 0) {
+      return [] as string[];
+    }
+
+    const path = pathInput.map((item) => String(item ?? "").trim()).filter(Boolean);
+    if (path.length === 0) {
+      return [] as string[];
+    }
+    if (path.length > 3) {
+      throw new BadRequestException(`${label} attribute path cannot exceed 3 levels`);
+    }
+
+    let nodes: DocumentTaxonomyNode[] = roots;
+    for (let index = 0; index < path.length; index += 1) {
+      const value = path[index];
+      const matched = nodes.find((item) => item.name === value);
+      if (!matched) {
+        throw new BadRequestException(`Unsupported ${label} attribute path: ${path.join(" / ")}`);
+      }
+      nodes = matched.children;
+    }
+
+    return path;
+  }
+
   private isMissingFolderTableError(error: unknown) {
     if (!(error instanceof QueryFailedError)) {
       return false;
@@ -912,17 +1069,116 @@ export class DocumentService implements OnModuleInit {
     }
   }
 
-  private async ensureTitleAvailable(title: string, excludeId?: string) {
+  private async resolveAvailableTitle(title: string, excludeId?: string) {
     const normalizedTitle = title.trim();
     if (!normalizedTitle) {
       throw new BadRequestException("Title is required");
     }
-    const existing = await this.documentRepository.findOne({
-      where: { title: normalizedTitle }
-    });
-    if (existing && existing.id !== excludeId) {
-      throw new BadRequestException(`Document title already exists: ${normalizedTitle}`);
+
+    const existingTitles = await this.collectConflictingTitles(normalizedTitle, excludeId);
+    if (!existingTitles.has(normalizedTitle)) {
+      return normalizedTitle;
     }
+
+    const baseTitle = this.trimTitleForSuffix(normalizedTitle, "");
+    for (let index = 2; index <= 9999; index += 1) {
+      const suffix = ` (${index})`;
+      const candidate = this.trimTitleForSuffix(baseTitle, suffix) + suffix;
+      if (!existingTitles.has(candidate)) {
+        return candidate;
+      }
+    }
+
+    throw new BadRequestException(`Unable to resolve a unique document title for: ${normalizedTitle}`);
+  }
+
+  private async collectConflictingTitles(title: string, excludeId?: string) {
+    const likePrefix = `${this.escapeLikePattern(title)}%`;
+    const rows = await this.documentRepository
+      .createQueryBuilder("document")
+      .select("document.title", "title")
+      .where("document.title LIKE :likePrefix ESCAPE '\\'", { likePrefix })
+      .andWhere(excludeId ? "document.id <> :excludeId" : "1=1", { excludeId })
+      .getRawMany<{ title: string }>();
+
+    return new Set(rows.map((row) => row.title));
+  }
+
+  private escapeLikePattern(value: string) {
+    return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+  }
+
+  private trimTitleForSuffix(title: string, suffix: string) {
+    const maxLength = 500 - suffix.length;
+    return title.length > maxLength ? title.slice(0, maxLength).trimEnd() : title;
+  }
+
+  private buildWatermarkContext(
+    source: PreviewWatermarkRenderContext["source"],
+    req: AuthRequest | undefined,
+    document?: { id?: string | null; title?: string | null; archivePath?: string | null },
+    scope: PreviewWatermarkRenderContext["scope"] = "view",
+    profile: PreviewWatermarkRenderContext["profile"] = "screen"
+  ): PreviewWatermarkRenderContext {
+    const forwardedFor = req?.headers?.["x-forwarded-for"];
+    const ip = typeof forwardedFor === "string" && forwardedFor.trim()
+      ? forwardedFor.split(",")[0].trim()
+      : req?.ip || req?.socket?.remoteAddress || null;
+
+    return {
+      scope,
+      profile,
+      source,
+      username: req?.user?.username ?? null,
+      role: req?.user?.role ?? null,
+      ip,
+      timestamp: new Date().toISOString(),
+      document: document ?? null
+    };
+  }
+
+  private async waitForPdfPageReady(page: Page) {
+    await page.evaluate(async () => {
+      if ("fonts" in document) {
+        await (document as Document & {
+          fonts: FontFaceSet;
+        }).fonts.ready;
+      }
+
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve());
+        });
+      });
+    });
+  }
+
+  private async resolvePdfBrowserExecutablePath() {
+    const candidates = [
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+      process.env.CHROME_PATH,
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+    ].filter((item): item is string => Boolean(item));
+
+    for (const candidate of candidates) {
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+
+    throw new BadRequestException(
+      "No Chromium/Edge executable found for PDF export. Set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH or install Edge/Chrome."
+    );
+  }
+
+  private sanitizeDownloadFilename(value: string) {
+    return value.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").trim() || "document";
   }
 
   private async cleanupFailedUpload(documentId: string, filePath: string) {
@@ -953,7 +1209,12 @@ export class DocumentService implements OnModuleInit {
     const nextVersionNo = (latest?.versionNo ?? 0) + 1;
     const metadataSnapshot = {
       title: document.title,
-      archivePath: document.archivePath
+      archivePath: document.archivePath,
+      businessDomain: document.businessDomain,
+      businessSubdomain: document.businessSubdomain,
+      businessPath: document.businessPath,
+      legalLevel: document.legalLevel,
+      legalPath: document.legalPath
     };
 
     const version = await this.versionRepository.save(
@@ -1036,6 +1297,11 @@ export class DocumentService implements OnModuleInit {
             documentId,
             title: document.title,
             archivePath: document.archivePath,
+            businessDomain: document.businessDomain,
+            businessSubdomain: document.businessSubdomain,
+            businessPath: document.businessPath,
+            legalLevel: document.legalLevel,
+            legalPath: document.legalPath,
             currentVersion: document.currentVersion,
             latestVersionNo: latestVersion?.versionNo ?? document.currentVersion,
             sourceFilename: latestTask?.sourceFilename ?? null,

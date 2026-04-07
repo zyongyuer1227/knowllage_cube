@@ -18,12 +18,31 @@ const actionError = ref("");
 const actionBusy = ref(false);
 const actionProgress = ref(0);
 const actionProgressLabel = ref("");
+const documentDialogMode = ref("");
+const documentDialogTitle = ref("");
+const documentDialogBusinessPath = ref([]);
+const documentDialogLegalPath = ref([]);
+const pendingImportFiles = ref([]);
 let progressTimer = null;
 const showAdminActions = computed(() => route.path === "/admin" && auth.isLoggedIn);
 const bannerVisible = computed(() => actionBusy.value || !!actionError.value || !!actionStatus.value);
 const actionPlaceholder = computed(() => actionMode.value === "folder" ? "输入完整文件夹路径，如 法律法规/国家/行政法规" : "输入新文档标题");
 const homeLinkTarget = computed(() => (auth.isLoggedIn ? "/admin" : "/"));
 const homeLinkLabel = computed(() => (auth.isLoggedIn ? "管理员" : "游客"));
+const businessLevel1Options = computed(() => workspace.getBusinessPathOptions([], 0));
+const businessLevel2Options = computed(() => workspace.getBusinessPathOptions(documentDialogBusinessPath.value, 1));
+const businessLevel3Options = computed(() => workspace.getBusinessPathOptions(documentDialogBusinessPath.value, 2));
+const legalLevel1Options = computed(() => workspace.getLegalPathOptions([], 0));
+const legalLevel2Options = computed(() => workspace.getLegalPathOptions(documentDialogLegalPath.value, 1));
+const legalLevel3Options = computed(() => workspace.getLegalPathOptions(documentDialogLegalPath.value, 2));
+const isSingleImport = computed(() => pendingImportFiles.value.length === 1);
+const documentDialogHeading = computed(() => (documentDialogMode.value === "import" ? "导入文档属性" : "新建文档"));
+const documentDialogConfirmLabel = computed(() => (documentDialogMode.value === "import" ? "开始导入" : "创建文档"));
+const documentDialogFileSummary = computed(() => pendingImportFiles.value.length <= 1
+    ? pendingImportFiles.value[0]?.name ?? ""
+    : `已选择 ${pendingImportFiles.value.length} 个文件，将共用本次属性定义`);
+const documentDialogBusinessSummary = computed(() => documentDialogBusinessPath.value.join(" / ") || "未设置业务领域");
+const documentDialogLegalSummary = computed(() => documentDialogLegalPath.value.join(" / ") || "未设置效力层级");
 function stopProgress() {
     if (progressTimer !== null) {
         window.clearInterval(progressTimer);
@@ -68,6 +87,16 @@ function handleLogout() {
     router.push("/");
 }
 function openAction(mode) {
+    if (mode === "document") {
+        documentDialogMode.value = "create";
+        documentDialogTitle.value = "";
+        documentDialogBusinessPath.value = [];
+        documentDialogLegalPath.value = [];
+        pendingImportFiles.value = [];
+        actionError.value = "";
+        actionStatus.value = "";
+        return;
+    }
     actionMode.value = mode;
     actionError.value = "";
     actionStatus.value = "";
@@ -77,20 +106,61 @@ function closeAction() {
     actionMode.value = "";
     actionInput.value = "";
 }
+function closeDocumentDialog() {
+    documentDialogMode.value = "";
+    documentDialogTitle.value = "";
+    documentDialogBusinessPath.value = [];
+    documentDialogLegalPath.value = [];
+    pendingImportFiles.value = [];
+    if (importInput.value) {
+        importInput.value.value = "";
+    }
+}
 async function handleImport(event) {
-    if (!auth.token)
-        return;
     const input = event.target;
     const files = Array.from(input.files ?? []);
     if (files.length === 0)
         return;
+    pendingImportFiles.value = files;
+    documentDialogMode.value = "import";
+    documentDialogTitle.value = files.length === 1 ? files[0].name.replace(/\.[^.]+$/, "") : "";
+    documentDialogBusinessPath.value = [];
+    documentDialogLegalPath.value = [];
+    actionError.value = "";
+    actionStatus.value = "";
+}
+async function submitDocumentDialog() {
+    if (!auth.token || !documentDialogMode.value)
+        return;
+    const normalizedTitle = documentDialogTitle.value.trim();
+    if (documentDialogMode.value === "create" && !normalizedTitle) {
+        actionError.value = "请输入文档标题";
+        return;
+    }
+    const attributes = {
+        businessPath: documentDialogBusinessPath.value,
+        legalPath: documentDialogLegalPath.value
+    };
     actionBusy.value = true;
     actionError.value = "";
     actionStatus.value = "";
-    const hasWord = files.some((file) => /\.(docx?|DOCX?)$/.test(file.name));
-    startProgress(hasWord ? "正在上传文档..." : "正在上传文档...");
     try {
-        const result = await workspace.importFiles(auth.token, files);
+        if (documentDialogMode.value === "create") {
+            startProgress("正在创建文档...");
+            await workspace.createDocument(auth.token, normalizedTitle, attributes);
+            closeDocumentDialog();
+            finishProgress("新文档已创建");
+            actionStatus.value = "新文档已创建";
+            return;
+        }
+        const files = [...pendingImportFiles.value];
+        if (files.length === 0) {
+            throw new Error("未选择导入文件");
+        }
+        const hasWord = files.some((file) => /\.(docx?|DOCX?)$/.test(file.name));
+        startProgress("正在上传文档...");
+        closeDocumentDialog();
+        const result = await workspace.importFiles(auth.token, files, attributes, isSingleImport.value ? normalizedTitle : undefined);
         const tasks = result?.tasks ?? [];
         if (tasks.length > 0) {
             setProgress(12, hasWord ? `上传完成，正在后台转换：${tasks[0]?.fileName ?? "文档"}` : "上传完成，正在处理文档...");
@@ -112,12 +182,11 @@ async function handleImport(event) {
     }
     catch (error) {
         resetProgress();
-        actionError.value = error instanceof Error ? error.message : "导入失败";
+        actionError.value = error instanceof Error ? error.message : documentDialogMode.value === "create" ? "创建失败" : "导入失败";
     }
     finally {
         resetProgress();
         actionBusy.value = false;
-        input.value = "";
     }
 }
 async function submitAction() {
@@ -131,20 +200,12 @@ async function submitAction() {
     actionBusy.value = true;
     actionError.value = "";
     actionStatus.value = "";
-    startProgress(actionMode.value === "document" ? "正在创建文档..." : "正在创建文件夹...");
+    startProgress("正在创建文件夹...");
     try {
-        if (actionMode.value === "document") {
-            await workspace.createDocument(auth.token, value);
-            closeAction();
-            finishProgress("新文档已创建");
-            actionStatus.value = "新文档已创建";
-        }
-        else {
-            await workspace.createFolder(auth.token, value);
-            closeAction();
-            finishProgress("新文件夹已创建");
-            actionStatus.value = "新文件夹已创建";
-        }
+        await workspace.createFolder(auth.token, value);
+        closeAction();
+        finishProgress("新文件夹已创建");
+        actionStatus.value = "新文件夹已创建";
     }
     catch (error) {
         resetProgress();
@@ -163,11 +224,37 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['route-page']} */ ;
 /** @type {__VLS_StyleScopedClasses['brand']} */ ;
 /** @type {__VLS_StyleScopedClasses['brand']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
 /** @type {__VLS_StyleScopedClasses['topbar-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['topbar-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['topbar-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['inline-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['inline-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-title-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-dialog-tip']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['theme-switcher']} */ ;
 /** @type {__VLS_StyleScopedClasses['theme-switcher']} */ ;
 /** @type {__VLS_StyleScopedClasses['topbar-btn']} */ ;
@@ -182,6 +269,14 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['admin-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['inline-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['inline-action']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-main']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
 // CSS variable injection 
 // CSS variable injection end 
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -282,7 +377,7 @@ if (__VLS_ctx.showAdminActions) {
     });
     /** @type {typeof __VLS_ctx.importInput} */ ;
 }
-if (__VLS_ctx.showAdminActions && __VLS_ctx.actionMode) {
+if (__VLS_ctx.showAdminActions && __VLS_ctx.actionMode === 'folder') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.form, __VLS_intrinsicElements.form)({
         ...{ onSubmit: (__VLS_ctx.submitAction) },
         ...{ class: "inline-action" },
@@ -442,31 +537,404 @@ if (__VLS_ctx.actionBusy || __VLS_ctx.actionError || __VLS_ctx.actionStatus) {
         });
     }
 }
+if (__VLS_ctx.documentDialogMode) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-backdrop" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "settings-dialog document-dialog" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
+        ...{ class: "settings-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "panel-eyebrow" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h3, __VLS_intrinsicElements.h3)({});
+    (__VLS_ctx.documentDialogHeading);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeDocumentDialog) },
+        type: "button",
+        ...{ class: "icon-btn" },
+        disabled: (__VLS_ctx.actionBusy),
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_35 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "xmark",
+        fixedWidth: true,
+    }));
+    const __VLS_36 = __VLS_35({
+        name: "xmark",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_35));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-form" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "document-hero" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-hero-main" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-hero-icon" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_38 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: (__VLS_ctx.documentDialogMode === 'import' ? 'file-import' : 'file-circle-plus'),
+        fixedWidth: true,
+    }));
+    const __VLS_39 = __VLS_38({
+        name: (__VLS_ctx.documentDialogMode === 'import' ? 'file-import' : 'file-circle-plus'),
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_38));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-hero-copy" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "document-hero-eyebrow" },
+    });
+    (__VLS_ctx.documentDialogMode === "import" ? "导入流程" : "新建流程");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    (__VLS_ctx.documentDialogMode === "import" ? "先定义文档属性，再进入后台转换" : "先定义文档属性，再创建空白文档");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.documentDialogMode === "import" ? __VLS_ctx.documentDialogFileSummary : "创建后可继续在管理员编辑区维护正文内容与属性。");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-hero-tags" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "document-chip" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_41 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "folder-tree",
+        fixedWidth: true,
+    }));
+    const __VLS_42 = __VLS_41({
+        name: "folder-tree",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_41));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.documentDialogBusinessSummary);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "document-chip" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_44 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "scale-balanced",
+        fixedWidth: true,
+    }));
+    const __VLS_45 = __VLS_44({
+        name: "scale-balanced",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_44));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.documentDialogLegalSummary);
+    if (__VLS_ctx.documentDialogMode === 'create' || __VLS_ctx.isSingleImport) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+            ...{ class: "document-title-field" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_47 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "file-lines",
+            fixedWidth: true,
+        }));
+        const __VLS_48 = __VLS_47({
+            name: "file-lines",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_47));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+            placeholder: (__VLS_ctx.documentDialogMode === 'create' ? '输入文档标题' : '输入导入后的文档标题'),
+        });
+        (__VLS_ctx.documentDialogTitle);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "document-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
+        ...{ class: "document-card-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-card-title" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_50 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "folder-tree",
+        fixedWidth: true,
+    }));
+    const __VLS_51 = __VLS_50({
+        name: "folder-tree",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_50));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-card-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogBusinessPath = [$event.target.value].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogBusinessPath[0] ?? ''),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.businessLevel1Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogBusinessPath = [
+                    __VLS_ctx.documentDialogBusinessPath[0],
+                    $event.target.value
+                ].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogBusinessPath[1] ?? ''),
+        disabled: (__VLS_ctx.businessLevel2Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.businessLevel2Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.businessLevel2Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogBusinessPath = [
+                    __VLS_ctx.documentDialogBusinessPath[0],
+                    __VLS_ctx.documentDialogBusinessPath[1],
+                    $event.target.value
+                ].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogBusinessPath[2] ?? ''),
+        disabled: (__VLS_ctx.businessLevel3Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.businessLevel3Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.businessLevel3Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "document-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
+        ...{ class: "document-card-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-card-title" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_53 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "scale-balanced",
+        fixedWidth: true,
+    }));
+    const __VLS_54 = __VLS_53({
+        name: "scale-balanced",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_53));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-card-grid" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogLegalPath = [$event.target.value].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogLegalPath[0] ?? ''),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.legalLevel1Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogLegalPath = [
+                    __VLS_ctx.documentDialogLegalPath[0],
+                    $event.target.value
+                ].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogLegalPath[1] ?? ''),
+        disabled: (__VLS_ctx.legalLevel2Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.legalLevel2Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.legalLevel2Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.select, __VLS_intrinsicElements.select)({
+        ...{ onChange: (...[$event]) => {
+                if (!(__VLS_ctx.documentDialogMode))
+                    return;
+                __VLS_ctx.documentDialogLegalPath = [
+                    __VLS_ctx.documentDialogLegalPath[0],
+                    __VLS_ctx.documentDialogLegalPath[1],
+                    $event.target.value
+                ].filter(Boolean);
+            } },
+        value: (__VLS_ctx.documentDialogLegalPath[2] ?? ''),
+        disabled: (__VLS_ctx.legalLevel3Options.length === 0),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+        value: "",
+    });
+    (__VLS_ctx.legalLevel3Options.length === 0 ? "当前层级无可选项" : "未设置");
+    for (const [item] of __VLS_getVForSourceType((__VLS_ctx.legalLevel3Options))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.option, __VLS_intrinsicElements.option)({
+            key: (item),
+            value: (item),
+        });
+        (item);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
+        ...{ class: "settings-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "document-dialog-tip" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "document-chip subtle" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_56 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "layer-group",
+        fixedWidth: true,
+    }));
+    const __VLS_57 = __VLS_56({
+        name: "layer-group",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_56));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "document-chip subtle" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_59 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "pen-ruler",
+        fixedWidth: true,
+    }));
+    const __VLS_60 = __VLS_59({
+        name: "pen-ruler",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_59));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "settings-submit" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.closeDocumentDialog) },
+        type: "button",
+        ...{ class: "save-btn secondary-btn" },
+        disabled: (__VLS_ctx.actionBusy),
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.submitDocumentDialog) },
+        type: "button",
+        ...{ class: "save-btn" },
+        disabled: (__VLS_ctx.actionBusy),
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_62 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: (__VLS_ctx.documentDialogMode === 'import' ? 'upload' : 'file-circle-plus'),
+        fixedWidth: true,
+    }));
+    const __VLS_63 = __VLS_62({
+        name: (__VLS_ctx.documentDialogMode === 'import' ? 'upload' : 'file-circle-plus'),
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_62));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.actionBusy ? "处理中..." : __VLS_ctx.documentDialogConfirmLabel);
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.main, __VLS_intrinsicElements.main)({
     ...{ class: "app-content" },
 });
-const __VLS_35 = {}.RouterView;
+const __VLS_65 = {}.RouterView;
 /** @type {[typeof __VLS_components.RouterView, typeof __VLS_components.RouterView, ]} */ ;
 // @ts-ignore
-const __VLS_36 = __VLS_asFunctionalComponent(__VLS_35, new __VLS_35({}));
-const __VLS_37 = __VLS_36({}, ...__VLS_functionalComponentArgsRest(__VLS_36));
+const __VLS_66 = __VLS_asFunctionalComponent(__VLS_65, new __VLS_65({}));
+const __VLS_67 = __VLS_66({}, ...__VLS_functionalComponentArgsRest(__VLS_66));
 {
-    const { default: __VLS_thisSlot } = __VLS_38.slots;
+    const { default: __VLS_thisSlot } = __VLS_68.slots;
     const [{ Component }] = __VLS_getSlotParams(__VLS_thisSlot);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "route-page" },
     });
-    const __VLS_39 = ((Component));
+    const __VLS_69 = ((Component));
     // @ts-ignore
-    const __VLS_40 = __VLS_asFunctionalComponent(__VLS_39, new __VLS_39({
+    const __VLS_70 = __VLS_asFunctionalComponent(__VLS_69, new __VLS_69({
         ...{ class: "route-screen" },
     }));
-    const __VLS_41 = __VLS_40({
+    const __VLS_71 = __VLS_70({
         ...{ class: "route-screen" },
-    }, ...__VLS_functionalComponentArgsRest(__VLS_40));
-    __VLS_38.slots['' /* empty slot name completion */];
+    }, ...__VLS_functionalComponentArgsRest(__VLS_70));
+    __VLS_68.slots['' /* empty slot name completion */];
 }
-var __VLS_38;
+var __VLS_68;
 __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
     ...{ class: "app-footer" },
 });
@@ -493,6 +961,40 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.
 /** @type {__VLS_StyleScopedClasses['banner-main']} */ ;
 /** @type {__VLS_StyleScopedClasses['progress-track']} */ ;
 /** @type {__VLS_StyleScopedClasses['progress-fill']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-backdrop']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-dialog']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-form']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-main']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-icon']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-hero-tags']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-title-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-card-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-dialog-tip']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle']} */ ;
+/** @type {__VLS_StyleScopedClasses['document-chip']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle']} */ ;
+/** @type {__VLS_StyleScopedClasses['settings-submit']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['app-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['route-page']} */ ;
 /** @type {__VLS_StyleScopedClasses['route-screen']} */ ;
@@ -515,15 +1017,33 @@ const __VLS_self = (await import('vue')).defineComponent({
             actionBusy: actionBusy,
             actionProgress: actionProgress,
             actionProgressLabel: actionProgressLabel,
+            documentDialogMode: documentDialogMode,
+            documentDialogTitle: documentDialogTitle,
+            documentDialogBusinessPath: documentDialogBusinessPath,
+            documentDialogLegalPath: documentDialogLegalPath,
             showAdminActions: showAdminActions,
             bannerVisible: bannerVisible,
             actionPlaceholder: actionPlaceholder,
             homeLinkTarget: homeLinkTarget,
             homeLinkLabel: homeLinkLabel,
+            businessLevel1Options: businessLevel1Options,
+            businessLevel2Options: businessLevel2Options,
+            businessLevel3Options: businessLevel3Options,
+            legalLevel1Options: legalLevel1Options,
+            legalLevel2Options: legalLevel2Options,
+            legalLevel3Options: legalLevel3Options,
+            isSingleImport: isSingleImport,
+            documentDialogHeading: documentDialogHeading,
+            documentDialogConfirmLabel: documentDialogConfirmLabel,
+            documentDialogFileSummary: documentDialogFileSummary,
+            documentDialogBusinessSummary: documentDialogBusinessSummary,
+            documentDialogLegalSummary: documentDialogLegalSummary,
             handleLogout: handleLogout,
             openAction: openAction,
             closeAction: closeAction,
+            closeDocumentDialog: closeDocumentDialog,
             handleImport: handleImport,
+            submitDocumentDialog: submitDocumentDialog,
             submitAction: submitAction,
         };
     },
