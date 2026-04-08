@@ -13,10 +13,21 @@ export type WorkspaceDoc = {
   archivePath: string;
   businessPath: string[];
   legalPath: string[];
+  attachments?: WorkspaceAttachment[];
   markdownSource?: string;
   rawText?: string;
   previewHtml?: string;
+  searchSnippet?: string;
   updatedAt?: string;
+};
+
+export type WorkspaceAttachment = {
+  id: string;
+  fileName: string;
+  displayName: string;
+  mimeType: string | null;
+  size: number;
+  uploadedAt: string;
 };
 
 export type WorkspaceFolder = {
@@ -244,6 +255,16 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     doc: Record<string, unknown>,
     fallback: Partial<WorkspaceDoc> = {}
   ): WorkspaceDoc {
+    const attachments = Array.isArray(doc.attachments)
+      ? (doc.attachments as Array<Record<string, unknown>>).map((item) => ({
+          id: String(item.id ?? ""),
+          fileName: String(item.fileName ?? item.displayName ?? ""),
+          displayName: String(item.displayName ?? item.fileName ?? ""),
+          mimeType: item.mimeType ? String(item.mimeType) : null,
+          size: Number(item.size ?? 0) || 0,
+          uploadedAt: String(item.uploadedAt ?? "")
+        }))
+      : fallback.attachments;
     return {
       id: String(doc.id ?? fallback.id ?? ""),
       title: String(doc.title ?? fallback.title ?? ""),
@@ -259,8 +280,19 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       markdownSource: doc.markdownContent !== undefined ? String(doc.markdownContent ?? "") : fallback.markdownSource,
       rawText: doc.rawText ? String(doc.rawText) : fallback.rawText,
       previewHtml: doc.previewHtml ? String(doc.previewHtml) : fallback.previewHtml,
+      attachments,
+      searchSnippet: doc.searchSnippet !== undefined ? String(doc.searchSnippet ?? "") : fallback.searchSnippet,
       updatedAt: String(doc.updatedAt ?? fallback.updatedAt ?? "")
     };
+  }
+
+  function applyDocSummaries(items: Array<Record<string, unknown>>) {
+    docs.value = items.map((item) => normalizeWorkspaceDoc(item, {
+      id: String(item.id ?? ""),
+      title: String(item.title ?? ""),
+      archivePath: String(item.archivePath ?? ""),
+      updatedAt: String(item.updatedAt ?? "")
+    }));
   }
 
   async function loadDocumentDetail(id: string, token?: string) {
@@ -346,14 +378,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         api.getPublicDocumentTaxonomy()
       ]);
 
-      const summaries = searchResult.items.map((item) => normalizeWorkspaceDoc(item, {
-        id: String(item.id ?? ""),
-        title: String(item.title ?? ""),
-        archivePath: String(item.archivePath ?? ""),
-        updatedAt: String(item.updatedAt ?? "")
-      }));
-
-      docs.value = summaries;
+      applyDocSummaries(searchResult.items);
       docDetails.value = {};
       defaultDocument.value = {
         id: "welcome",
@@ -371,7 +396,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         parentPath: item.parentPath ? String(item.parentPath) : null
       }));
       documentTaxonomy.value = taxonomy;
-      if (!summaries.some((doc) => doc.id === activeId.value)) {
+      if (!docs.value.some((doc) => doc.id === activeId.value)) {
         activeId.value = "";
         hasUserSelectedDocument.value = false;
       }
@@ -402,14 +427,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         api.getAdminDocumentTaxonomy(token)
       ]);
 
-      const summaries = searchResult.items.map((item) => normalizeWorkspaceDoc(item, {
-        id: String(item.id ?? ""),
-        title: String(item.title ?? ""),
-        archivePath: String(item.archivePath ?? ""),
-        updatedAt: String(item.updatedAt ?? "")
-      }));
-
-      docs.value = summaries;
+      applyDocSummaries(searchResult.items);
       docDetails.value = {};
       defaultDocument.value = {
         id: "welcome",
@@ -427,7 +445,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         parentPath: item.parentPath ? String(item.parentPath) : null
       }));
       documentTaxonomy.value = taxonomy;
-      if (!summaries.some((doc) => doc.id === activeId.value)) {
+      if (!docs.value.some((doc) => doc.id === activeId.value)) {
         activeId.value = "";
         hasUserSelectedDocument.value = false;
       }
@@ -441,6 +459,66 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
   }
 
+  async function searchPublicDocuments(query: string) {
+    const searchResult = await api.publicSearch({
+      q: query.trim(),
+      page: 1,
+      pageSize: 100,
+      sortBy: query.trim() ? "relevance" : "updatedAt",
+      order: "desc"
+    });
+    applyDocSummaries(searchResult.items);
+    if (!docs.value.some((doc) => doc.id === activeId.value)) {
+      activeId.value = "";
+      hasUserSelectedDocument.value = false;
+      syncEditorFromActive();
+    }
+  }
+
+  async function uploadAttachment(token: string, documentId: string, file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const result = await api.uploadDocumentAttachment(documentId, formData, token);
+    const attachments = Array.isArray(result.attachments)
+      ? normalizeWorkspaceDoc({ id: documentId, attachments: result.attachments }, docs.value.find((doc) => doc.id === documentId)).attachments
+      : undefined;
+
+    if (attachments) {
+      const fallback = docs.value.find((doc) => doc.id === documentId);
+      const detail = docDetails.value[documentId];
+      if (detail) {
+        docDetails.value = {
+          ...docDetails.value,
+          [documentId]: {
+            ...detail,
+            attachments
+          }
+        };
+      }
+      if (fallback) {
+        docs.value = docs.value.map((doc) => (doc.id === documentId ? { ...doc, attachments } : doc));
+      }
+    }
+  }
+
+  async function deleteAttachment(token: string, documentId: string, attachmentId: string) {
+    const result = await api.deleteDocumentAttachment(documentId, attachmentId, token);
+    const attachments = Array.isArray(result.attachments)
+      ? normalizeWorkspaceDoc({ id: documentId, attachments: result.attachments }, docs.value.find((doc) => doc.id === documentId)).attachments
+      : [];
+    const detail = docDetails.value[documentId];
+    if (detail) {
+      docDetails.value = {
+        ...docDetails.value,
+        [documentId]: {
+          ...detail,
+          attachments
+        }
+      };
+    }
+    docs.value = docs.value.map((doc) => (doc.id === documentId ? { ...doc, attachments } : doc));
+  }
+
   async function createDocument(token: string, title: string, attributes: DocumentAttributes) {
     const normalizedTitle = title.trim();
     if (!normalizedTitle) return;
@@ -449,8 +527,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("title", normalizedTitle);
-    attributes.businessPath.forEach((value) => formData.append("businessPath", value));
-    attributes.legalPath.forEach((value) => formData.append("legalPath", value));
+    formData.append("businessPath", JSON.stringify(attributes.businessPath));
+    formData.append("legalPath", JSON.stringify(attributes.legalPath));
     const targetPath = toArchivePath(selectedFolderPath.value || editorArchivePath.value);
     if (targetPath) {
       formData.append("archivePath", targetPath);
@@ -472,8 +550,8 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (normalizedTitle) {
       formData.append("title", normalizedTitle);
     }
-    attributes.businessPath.forEach((value) => formData.append("businessPath", value));
-    attributes.legalPath.forEach((value) => formData.append("legalPath", value));
+    formData.append("businessPath", JSON.stringify(attributes.businessPath));
+    formData.append("legalPath", JSON.stringify(attributes.legalPath));
     const targetPath = toArchivePath(selectedFolderPath.value || editorArchivePath.value);
     if (targetPath) {
       formData.append("archivePath", targetPath);
@@ -740,6 +818,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     activeId,
     createDocument,
     createFolder,
+    deleteAttachment,
     documentTaxonomy,
     docs,
     businessDomainOptions,
@@ -759,6 +838,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     loadPublicWorkspace,
     loading,
     moveDocument,
+    searchPublicDocuments,
     getBusinessPathOptions,
     getLegalPathOptions,
     formatEditorTextWithAi,
@@ -772,6 +852,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     selectedFolderPath,
     syncEditorFromActive,
     tree,
+    uploadAttachment,
     waitForImportTasks,
     usingAdminData
   };

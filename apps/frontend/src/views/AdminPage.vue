@@ -21,6 +21,10 @@ const settingsBusy = ref(false);
 const formatBusy = ref(false);
 const formatProgress = ref(0);
 const formatStageLabel = ref("");
+const attachmentBusy = ref(false);
+const attachmentInput = ref<HTMLInputElement | null>(null);
+const attachmentDownloadId = ref("");
+const showAttachments = ref(false);
 const markdownTextarea = ref<HTMLTextAreaElement | null>(null);
 const previewFrame = ref<InstanceType<typeof AdminDocPreview> | null>(null);
 const syncSource = ref<"editor" | "preview" | null>(null);
@@ -29,8 +33,6 @@ const showTaxonomySettings = ref(false);
 const taxonomyBusy = ref(false);
 const taxonomyBusinessPathsText = ref("");
 const taxonomyLegalPathsText = ref("");
-const activeBusinessPath = ref<string[]>([]);
-const activeLegalLevel = ref("");
 const settingsDialogPosition = ref({ x: 0, y: 0 });
 const settingsDialogDragging = ref(false);
 const settingsDialogDragStart = ref({ x: 0, y: 0, pointerX: 0, pointerY: 0 });
@@ -74,27 +76,21 @@ const businessLevel3Options = computed(() => workspace.getBusinessPathOptions(wo
 const legalLevel1Options = computed(() => workspace.getLegalPathOptions([], 0));
 const legalLevel2Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 1));
 const legalLevel3Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 2));
-const legalTabs = computed(() => workspace.documentTaxonomy.legalLevels.map((item) => item.name));
-const businessRoots = computed(() => workspace.documentTaxonomy.businessDomains);
 const filteredDocs = computed(() => {
   const keyword = search.value.trim().toLowerCase();
   return workspace.docs.filter((doc) => {
-    const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    const matchesBusiness =
-      activeBusinessPath.value.length === 0 ||
-      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
     const matchesKeyword =
       !keyword ||
       doc.title.toLowerCase().includes(keyword) ||
       doc.businessPath.join("/").toLowerCase().includes(keyword) ||
       doc.legalPath.join("/").toLowerCase().includes(keyword);
-    return matchesLegal && matchesBusiness && matchesKeyword;
+    return matchesKeyword;
   });
 });
 
 const selectedCount = computed(() => selectedDocumentIds.value.length);
-const activeBusinessSummary = computed(() => activeBusinessPath.value.join(" / ") || "全部业务领域");
-const activeLegalSummary = computed(() => activeLegalLevel.value || "全部效力层级");
+const activeAttachments = computed(() => workspace.activeDocument?.attachments ?? []);
+const activePersistedDocumentId = computed(() => (/^\d+$/.test(workspace.activeDocument?.id ?? "") ? workspace.activeDocument!.id : ""));
 
 function toggleDocumentSelection(doc: WorkspaceDoc) {
   if (selectedDocumentIds.value.includes(doc.id)) {
@@ -106,53 +102,6 @@ function toggleDocumentSelection(doc: WorkspaceDoc) {
 
 function clearSelection() {
   selectedDocumentIds.value = [];
-}
-
-function setLegalLevel(level: string) {
-  activeLegalLevel.value = level;
-}
-
-function selectBusinessPath(path: string[]) {
-  activeBusinessPath.value = path;
-}
-
-function clearBusinessPath() {
-  activeBusinessPath.value = [];
-}
-
-function countDocsForLegal(level: string) {
-  return workspace.docs.filter((doc) => {
-    const matchesLegal = doc.legalPath[0] === level;
-    const matchesBusiness =
-      activeBusinessPath.value.length === 0 ||
-      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-    return matchesLegal && matchesBusiness;
-  }).length;
-}
-
-function countDocsForBusiness(path: string[]) {
-  return workspace.docs.filter((doc) => {
-    const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
-    const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    return matchesPath && matchesLegal;
-  }).length;
-}
-
-function countDocsForAllLegal() {
-  return workspace.docs.filter((doc) => {
-    return activeBusinessPath.value.length === 0 ||
-      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-  }).length;
-}
-
-function countDocsForAllBusiness() {
-  return workspace.docs.filter((doc) => {
-    return !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-  }).length;
-}
-
-function isBusinessPathActive(path: string[]) {
-  return path.length === activeBusinessPath.value.length && path.every((segment, index) => activeBusinessPath.value[index] === segment);
 }
 
 function withScrollSyncLock(source: "editor" | "preview", callback: () => void) {
@@ -500,6 +449,86 @@ async function deleteSelectedDocuments() {
   }
 }
 
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+  return `${size} B`;
+}
+
+function openAttachmentPicker() {
+  if (!activePersistedDocumentId.value || attachmentBusy.value || workspace.activeDocumentLoading) {
+    return;
+  }
+  attachmentInput.value?.click();
+  showAttachments.value = true;
+}
+
+async function handleAttachmentSelected(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file || !auth.token || !activePersistedDocumentId.value) {
+    return;
+  }
+
+  attachmentBusy.value = true;
+  try {
+    await workspace.uploadAttachment(auth.token, activePersistedDocumentId.value, file);
+    statusMessage.value = `已添加附件：${file.name}`;
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : "附件上传失败";
+  } finally {
+    attachmentBusy.value = false;
+  }
+}
+
+async function downloadAttachment(attachmentId: string, fileName: string) {
+  if (!auth.token || !activePersistedDocumentId.value) {
+    return;
+  }
+
+  attachmentDownloadId.value = attachmentId;
+  try {
+    const blob = await api.downloadDocumentAttachment(activePersistedDocumentId.value, attachmentId, auth.token);
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : "附件下载失败";
+  } finally {
+    attachmentDownloadId.value = "";
+  }
+}
+
+async function removeAttachment(attachmentId: string, fileName: string) {
+  if (!auth.token || !activePersistedDocumentId.value || attachmentBusy.value) {
+    return;
+  }
+  const confirmed = window.confirm(`确认删除附件“${fileName}”吗？`);
+  if (!confirmed) {
+    return;
+  }
+
+  attachmentBusy.value = true;
+  try {
+    await workspace.deleteAttachment(auth.token, activePersistedDocumentId.value, attachmentId);
+    statusMessage.value = `已删除附件：${fileName}`;
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : "附件删除失败";
+  } finally {
+    attachmentBusy.value = false;
+  }
+}
+
 watch(
   () => workspace.docs.map((doc) => doc.id),
   (ids) => {
@@ -515,6 +544,8 @@ watch(
     setEditorScrollRatio(0);
     previewFrame.value?.setScrollRatio(0);
     closeAttributes();
+    showAttachments.value = false;
+    attachmentInput.value && (attachmentInput.value.value = "");
   }
 );
 
@@ -577,24 +608,6 @@ onBeforeUnmount(() => {
           <input v-model="search" type="text" placeholder="搜索标题、业务领域、效力层级..." />
         </label>
 
-        <div class="admin-legal-nav">
-          <button type="button" class="admin-legal-pill" :class="{ active: !activeLegalLevel }" @click="setLegalLevel('')">
-            <span>全部</span>
-            <strong>{{ countDocsForAllLegal() }}</strong>
-          </button>
-          <button
-            v-for="level in legalTabs"
-            :key="level"
-            type="button"
-            class="admin-legal-pill"
-            :class="{ active: activeLegalLevel === level }"
-            @click="setLegalLevel(level)"
-          >
-            <span>{{ level }}</span>
-            <strong>{{ countDocsForLegal(level) }}</strong>
-          </button>
-        </div>
-
         <div class="pane-tools" :class="{ active: workspace.loading || selectedCount > 0 }">
           <div v-if="workspace.loading" class="status">同步中...</div>
 
@@ -614,51 +627,9 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="folder-tree admin-doc-browser">
-          <div class="admin-business-filter">
-            <button type="button" class="admin-business-all" :class="{ active: activeBusinessPath.length === 0 }" @click="clearBusinessPath">
-              <span>全部业务领域</span>
-              <strong>{{ countDocsForAllBusiness() }}</strong>
-            </button>
-            <div class="admin-business-tree">
-              <template v-for="node in businessRoots" :key="node.name">
-                <button
-                  type="button"
-                  class="admin-business-item"
-                  :class="{ active: isBusinessPathActive([node.name]) }"
-                  @click="selectBusinessPath([node.name])"
-                >
-                  <span>{{ node.name }}</span>
-                  <strong>{{ countDocsForBusiness([node.name]) }}</strong>
-                </button>
-                <button
-                  v-for="child in node.children"
-                  :key="`${node.name}/${child.name}`"
-                  type="button"
-                  class="admin-business-item child"
-                  :class="{ active: isBusinessPathActive([node.name, child.name]) }"
-                  @click="selectBusinessPath([node.name, child.name])"
-                >
-                  <span>{{ child.name }}</span>
-                  <strong>{{ countDocsForBusiness([node.name, child.name]) }}</strong>
-                </button>
-                <button
-                  v-for="child in node.children.flatMap((item) => item.children.map((grandchild) => ({ parent: item.name, name: grandchild.name })))"
-                  :key="`${node.name}/${child.parent}/${child.name}`"
-                  type="button"
-                  class="admin-business-item grandchild"
-                  :class="{ active: isBusinessPathActive([node.name, child.parent, child.name]) }"
-                  @click="selectBusinessPath([node.name, child.parent, child.name])"
-                >
-                  <span>{{ child.name }}</span>
-                  <strong>{{ countDocsForBusiness([node.name, child.parent, child.name]) }}</strong>
-                </button>
-              </template>
-            </div>
-          </div>
-
           <div class="admin-doc-list">
             <div class="admin-doc-list-header">
-              <span>{{ activeLegalSummary }}</span>
+              <span>文档列表</span>
               <strong>{{ filteredDocs.length }}</strong>
             </div>
             <button
@@ -708,6 +679,13 @@ onBeforeUnmount(() => {
               <FaIcon name="pen-to-square" fixed-width />
               <span>{{ workspace.activeDocument?.title || "未选择文档" }}</span>
             </button>
+            <input
+              ref="attachmentInput"
+              type="file"
+              class="attachment-input"
+              :disabled="!activePersistedDocumentId || attachmentBusy || workspace.activeDocumentLoading"
+              @change="handleAttachmentSelected"
+            />
           </div>
         </header>
 
@@ -728,10 +706,65 @@ onBeforeUnmount(() => {
                     <FaIcon name="code" fixed-width />
                     <span>Markdown 源码</span>
                   </div>
-                  <button type="button" class="subtle-btn convert-btn" :disabled="formatBusy || workspace.activeDocumentLoading" @click="normalizeMarkdown">
-                    <FaIcon name="wand-magic-sparkles" fixed-width />
-                    <span>{{ formatBusy ? "大模型处理中..." : "一键转换md格式" }}</span>
-                  </button>
+                  <div class="panel-title-actions">
+                    <button
+                      type="button"
+                      class="subtle-btn header-attachment-btn"
+                      :disabled="!activePersistedDocumentId || attachmentBusy || workspace.activeDocumentLoading"
+                      @click="showAttachments = !showAttachments"
+                    >
+                      <FaIcon name="paperclip" fixed-width />
+                      <span>{{ attachmentBusy ? "处理中..." : "附件" }}</span>
+                    </button>
+                    <button type="button" class="subtle-btn convert-btn" :disabled="formatBusy || workspace.activeDocumentLoading" @click="normalizeMarkdown">
+                      <FaIcon name="wand-magic-sparkles" fixed-width />
+                      <span>{{ formatBusy ? "大模型处理中..." : "一键转换md格式" }}</span>
+                    </button>
+                  </div>
+                </div>
+                <div v-if="showAttachments" class="attachment-popover">
+                  <div class="attachment-popover-header">
+                    <span>附件</span>
+                    <button
+                      type="button"
+                      class="subtle-btn"
+                      :disabled="!activePersistedDocumentId || attachmentBusy || workspace.activeDocumentLoading"
+                      @click="openAttachmentPicker"
+                    >
+                      <FaIcon name="paperclip" fixed-width />
+                      <span>添加附件</span>
+                    </button>
+                  </div>
+                  <div v-if="activePersistedDocumentId" class="attachment-list">
+                    <div v-if="activeAttachments.length === 0" class="attachment-empty compact">当前文档还没有附件</div>
+                    <div v-for="attachment in activeAttachments" :key="attachment.id" class="attachment-item compact">
+                      <div class="attachment-copy">
+                        <strong>{{ attachment.displayName }}</strong>
+                        <span>{{ formatFileSize(attachment.size) }} · {{ attachment.uploadedAt.slice(0, 10) }}</span>
+                      </div>
+                      <div class="attachment-actions">
+                        <button
+                          type="button"
+                          class="subtle-btn"
+                          :disabled="attachmentDownloadId === attachment.id"
+                          @click="downloadAttachment(attachment.id, attachment.displayName || attachment.fileName)"
+                        >
+                          <FaIcon name="download" fixed-width />
+                          <span>{{ attachmentDownloadId === attachment.id ? "下载中..." : "下载" }}</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="subtle-btn danger-text"
+                          :disabled="attachmentBusy"
+                          @click="removeAttachment(attachment.id, attachment.displayName || attachment.fileName)"
+                        >
+                          <FaIcon name="trash-can" fixed-width />
+                          <span>删除</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="attachment-empty compact">欢迎页不支持附件；请先选择正式文档。</div>
                 </div>
                 <label class="editor-field">
                   <textarea ref="markdownTextarea" v-model="workspace.editorMarkdown" :disabled="workspace.activeDocumentLoading" @scroll="syncPreviewFromEditor"></textarea>
@@ -1094,7 +1127,7 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 12px;
   border: 1px solid var(--border-color);
-  border-radius: 18px;
+  border-radius: 4px;
   background: var(--panel-bg);
 }
 
@@ -1112,7 +1145,7 @@ onBeforeUnmount(() => {
 
 .file-pane {
   border-right: 1px solid var(--border-color);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 92%, #000 8%), var(--panel-bg));
+  background: var(--panel-bg);
   padding: 14px 12px;
   display: grid;
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
@@ -1161,7 +1194,7 @@ input,
 select,
 textarea {
   border: 1px solid var(--input-border);
-  border-radius: 10px;
+  border-radius: 4px;
   background: var(--panel-muted-bg);
   color: inherit;
   padding: 10px 12px;
@@ -1173,8 +1206,8 @@ textarea {
   height: 100%;
   width: 100%;
   box-sizing: border-box;
-  border: 0;
-  border-radius: 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
   background: var(--panel-muted-bg);
   padding: 14px 16px 18px;
   resize: none;
@@ -1224,18 +1257,18 @@ textarea::-webkit-scrollbar-thumb:hover {
   width: 100%;
   box-sizing: border-box;
   min-height: 30px;
-  border: 1px solid color-mix(in srgb, var(--input-border) 72%, transparent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--input-bg) 72%, var(--panel-header-bg) 28%);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--input-bg);
   padding: 6px 10px 6px 30px;
   font-size: 12px;
-  transition: border-color 120ms ease, background-color 120ms ease;
+  transition: border-color 0.33s ease, background-color 0.33s ease;
 }
 
 .search-box input:focus {
   outline: none;
-  border-color: var(--nav-active-border);
-  background: color-mix(in srgb, var(--input-bg) 84%, var(--panel-bg) 16%);
+  border-color: var(--accent-bg);
+  background: var(--input-bg);
 }
 
 .folder-tree {
@@ -1248,46 +1281,9 @@ textarea::-webkit-scrollbar-thumb:hover {
   padding-right: 2px;
 }
 
-.admin-legal-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.admin-legal-pill,
-.admin-business-all,
-.admin-business-item,
 .admin-doc-item {
   font: inherit;
 }
-
-.admin-legal-pill {
-  border: 1px solid var(--input-border);
-  background: var(--panel-muted-bg);
-  color: var(--text-secondary);
-  min-height: 28px;
-  padding: 0 8px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.admin-legal-pill strong {
-  min-width: 18px;
-  height: 18px;
-  border-radius: 999px;
-  display: inline-grid;
-  place-items: center;
-  background: var(--panel-header-bg);
-  font-size: 10px;
-}
-
-.admin-legal-pill.active,
-.admin-business-all.active,
-.admin-business-item.active,
 .admin-doc-item.active {
   background: var(--nav-active-bg);
   border-color: var(--nav-active-border);
@@ -1299,53 +1295,9 @@ textarea::-webkit-scrollbar-thumb:hover {
   gap: 12px;
 }
 
-.admin-business-filter,
 .admin-doc-list {
   display: grid;
   gap: 8px;
-}
-
-.admin-business-all {
-  border: 1px solid var(--input-border);
-  background: var(--panel-muted-bg);
-  color: var(--text-primary);
-  min-height: 32px;
-  padding: 0 10px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.admin-business-tree {
-  display: grid;
-  gap: 4px;
-}
-
-.admin-business-item {
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-secondary);
-  min-height: 30px;
-  padding: 0 8px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  cursor: pointer;
-  font-size: 11.5px;
-  text-align: left;
-}
-
-.admin-business-item.child {
-  padding-left: 18px;
-}
-
-.admin-business-item.grandchild {
-  padding-left: 30px;
 }
 
 .admin-doc-list-header {
@@ -1358,48 +1310,50 @@ textarea::-webkit-scrollbar-thumb:hover {
 
 .admin-doc-list {
   min-height: 0;
+  gap: 0;
 }
 
 .admin-doc-item {
   width: 100%;
-  border: 1px solid color-mix(in srgb, var(--input-border) 82%, transparent);
-  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--input-border) 45%, transparent);
+  background: transparent;
   color: inherit;
-  min-height: 58px;
-  padding: 8px 10px 8px 12px;
-  border-radius: 8px;
+  min-height: 50px;
+  padding: 7px 2px 7px 4px;
+  border-radius: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
   gap: 6px;
-  align-items: stretch;
+  align-items: start;
   cursor: pointer;
-  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
 }
 
 .admin-doc-item:hover {
-  border-color: color-mix(in srgb, var(--nav-active-border) 48%, var(--input-border) 52%);
-  background: color-mix(in srgb, var(--panel-bg) 76%, var(--hover-bg) 24%);
+  background: color-mix(in srgb, var(--hover-bg) 28%, transparent);
 }
 
 .admin-doc-main {
   min-width: 0;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
+  gap: 8px;
+  align-items: start;
 }
 
 .admin-doc-check {
   width: 14px;
   height: 14px;
-  margin-top: 0;
+  margin-top: 2px;
 }
 
 .admin-doc-copy {
   display: grid;
   gap: 3px;
   min-width: 0;
-  align-self: center;
+  align-self: start;
+  justify-items: center;
+  text-align: center;
 }
 
 .admin-doc-copy strong,
@@ -1425,6 +1379,7 @@ textarea::-webkit-scrollbar-thumb:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 3px 5px;
+  justify-content: center;
 }
 
 .admin-doc-tag {
@@ -1459,21 +1414,21 @@ textarea::-webkit-scrollbar-thumb:hover {
 
 .admin-doc-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-end;
-  align-self: stretch;
-  padding-left: 4px;
-  border-left: 1px solid color-mix(in srgb, var(--input-border) 55%, transparent);
+  align-self: start;
+  padding-left: 0;
+  border-left: 0;
 }
 
 .admin-doc-action {
-  min-height: 100%;
+  min-height: 24px;
   width: 28px;
   padding: 0;
   border: 0;
   background: transparent;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: flex-end;
 }
 
@@ -1559,6 +1514,12 @@ textarea::-webkit-scrollbar-thumb:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding-top: 10px;
+}
+
+.header-attachment-btn {
+  min-height: 32px;
+  padding-inline: 10px;
 }
 
 .tab {
@@ -1592,6 +1553,67 @@ textarea::-webkit-scrollbar-thumb:hover {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-bottom: 14px;
+}
+
+.attachment-input {
+  display: none;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--input-border) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-muted-bg) 82%, transparent);
+}
+
+.attachment-item.compact {
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--panel-bg) 84%, var(--panel-muted-bg) 16%);
+}
+
+.attachment-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.attachment-copy strong,
+.attachment-copy span {
+  margin: 0;
+}
+
+.attachment-copy strong {
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.attachment-copy span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.attachment-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.attachment-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.attachment-empty.compact {
+  padding: 2px 0;
+}
+
+.danger-text {
+  color: #c56161;
 }
 
 .editor-split {
@@ -1645,10 +1667,37 @@ textarea::-webkit-scrollbar-thumb:hover {
   gap: 8px;
 }
 
+.panel-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .convert-btn {
   min-height: 26px;
   padding: 3px 8px;
   font-size: 12px;
+}
+
+.attachment-popover {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--input-border) 76%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg) 88%, var(--panel-header-bg) 12%);
+}
+
+.attachment-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.attachment-popover-header span {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .preview-surface {

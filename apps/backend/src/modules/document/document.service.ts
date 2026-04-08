@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { randomUUID } from "crypto";
 import { InjectRepository } from "@nestjs/typeorm";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
@@ -17,7 +18,7 @@ import { SystemService } from "../system/system.service";
 import { DocumentContentEntity } from "./entities/document-content.entity";
 import { DocumentFolderEntity } from "./entities/document-folder.entity";
 import { DocumentConversionTaskEntity } from "./entities/document-conversion-task.entity";
-import { DocumentEntity } from "./entities/document.entity";
+import { type DocumentAttachment, DocumentEntity } from "./entities/document.entity";
 import { DocumentVersionEntity } from "./entities/document-version.entity";
 import { renderPersistedPreviewHtml } from "./document-preview.util";
 import { type DocumentAttributeInput, type DocumentTaxonomyNode } from "./document-taxonomy";
@@ -141,7 +142,8 @@ export class DocumentService implements OnModuleInit {
         businessSubdomain: attributes.businessPath[1] ?? null,
         businessPath: attributes.businessPath,
         legalLevel: attributes.legalPath[0] ?? null,
-        legalPath: attributes.legalPath
+        legalPath: attributes.legalPath,
+        attachments: []
       })
     );
 
@@ -337,6 +339,7 @@ export class DocumentService implements OnModuleInit {
     });
     return {
       ...document,
+      attachments: this.serializeAttachments(document.attachments),
       markdownContent: content?.markdownContent ?? null,
       rawText: await this.readTextFile(this.getDocumentAssetPaths(id).rawTextPath),
       previewHtml: content?.markdownContent
@@ -359,6 +362,82 @@ export class DocumentService implements OnModuleInit {
 
   async exportPublicDocumentPdf(id: string, req?: AuthRequest) {
     return this.exportDocumentPdfForSource(id, "public", req);
+  }
+
+  async addAttachment(
+    documentId: string,
+    file: { originalname: string; buffer?: Buffer; size?: number; path?: string; mimetype?: string },
+    operatorId?: number
+  ) {
+    const document = await this.documentRepository.findOne({ where: { id: documentId } });
+    if (!document) {
+      throw new NotFoundException("Document not found");
+    }
+
+    const fileBuffer = await this.readUploadedFile(file);
+    const attachment = await this.persistAttachment(documentId, file.originalname, fileBuffer, file.mimetype);
+    const attachments = [...this.normalizeAttachments(document.attachments), attachment];
+    document.attachments = attachments;
+    await this.documentRepository.save(document);
+    await this.syncDocumentAssets(documentId);
+    await this.logDocOperation(operatorId, "document.attachment.add", documentId, {
+      attachmentId: attachment.id,
+      fileName: attachment.fileName,
+      size: attachment.size
+    });
+
+    return {
+      documentId,
+      attachment: this.serializeAttachment(attachment),
+      attachments: this.serializeAttachments(attachments)
+    };
+  }
+
+  async deleteAttachment(documentId: string, attachmentId: string, operatorId?: number) {
+    const document = await this.documentRepository.findOne({ where: { id: documentId } });
+    if (!document) {
+      throw new NotFoundException("Document not found");
+    }
+
+    const attachments = this.normalizeAttachments(document.attachments);
+    const target = attachments.find((item) => item.id === attachmentId);
+    if (!target) {
+      throw new NotFoundException("Attachment not found");
+    }
+
+    await fs.rm(this.resolveAttachmentPath(documentId, target.relativePath), { force: true });
+    document.attachments = attachments.filter((item) => item.id !== attachmentId);
+    await this.documentRepository.save(document);
+    await this.syncDocumentAssets(documentId);
+    await this.logDocOperation(operatorId, "document.attachment.delete", documentId, {
+      attachmentId,
+      fileName: target.fileName
+    });
+
+    return {
+      documentId,
+      attachmentId,
+      deleted: true,
+      attachments: this.serializeAttachments(document.attachments)
+    };
+  }
+
+  async getAttachmentFile(documentId: string, attachmentId: string) {
+    const document = await this.documentRepository.findOne({ where: { id: documentId } });
+    if (!document) {
+      throw new NotFoundException("Document not found");
+    }
+
+    const attachment = this.normalizeAttachments(document.attachments).find((item) => item.id === attachmentId);
+    if (!attachment) {
+      throw new NotFoundException("Attachment not found");
+    }
+
+    return {
+      buffer: await fs.readFile(this.resolveAttachmentPath(documentId, attachment.relativePath)),
+      fileName: attachment.displayName || attachment.fileName,
+      mimeType: attachment.mimeType
+    };
   }
 
   private async exportDocumentPdfForSource(
@@ -665,6 +744,71 @@ export class DocumentService implements OnModuleInit {
     const filePath = join(sourceDir, safeName);
     await fs.writeFile(filePath, buffer);
     return filePath;
+  }
+
+  private async persistAttachment(documentId: string, originalName: string, buffer: Buffer, mimeType?: string | null) {
+    const assetPaths = this.getDocumentAssetPaths(documentId);
+    const safeName = originalName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
+    const storedName = `${randomUUID()}-${safeName}`;
+    await fs.mkdir(assetPaths.attachmentDir, { recursive: true });
+    await fs.writeFile(join(assetPaths.attachmentDir, storedName), buffer);
+    return {
+      id: randomUUID(),
+      fileName: safeName,
+      displayName: safeName,
+      mimeType: typeof mimeType === "string" && mimeType.trim() ? mimeType.trim() : null,
+      size: buffer.byteLength,
+      relativePath: `attachments/${storedName}`,
+      uploadedAt: new Date().toISOString()
+    } satisfies DocumentAttachment;
+  }
+
+  private resolveAttachmentPath(documentId: string, relativePath: string) {
+    return join(this.getDocumentStorageDir(documentId), ...relativePath.split("/").filter(Boolean));
+  }
+
+  private normalizeAttachments(value: unknown): DocumentAttachment[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const attachment = item as Record<string, unknown>;
+        const id = String(attachment.id ?? "").trim();
+        const fileName = String(attachment.fileName ?? attachment.displayName ?? "").trim();
+        const relativePath = String(attachment.relativePath ?? "").trim();
+        if (!id || !fileName || !relativePath) {
+          return null;
+        }
+        return {
+          id,
+          fileName,
+          displayName: String(attachment.displayName ?? fileName).trim() || fileName,
+          mimeType: typeof attachment.mimeType === "string" && attachment.mimeType.trim() ? attachment.mimeType.trim() : null,
+          size: Number(attachment.size ?? 0) || 0,
+          relativePath,
+          uploadedAt: String(attachment.uploadedAt ?? new Date().toISOString())
+        } satisfies DocumentAttachment;
+      })
+      .filter((item): item is DocumentAttachment => Boolean(item));
+  }
+
+  private serializeAttachment(attachment: DocumentAttachment) {
+    return {
+      id: attachment.id,
+      fileName: attachment.fileName,
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      uploadedAt: attachment.uploadedAt
+    };
+  }
+
+  private serializeAttachments(value: unknown) {
+    return this.normalizeAttachments(value).map((attachment) => this.serializeAttachment(attachment));
   }
 
   private async readUploadedFile(file: { originalname: string; buffer?: Buffer; size?: number; path?: string }) {
@@ -1214,7 +1358,8 @@ export class DocumentService implements OnModuleInit {
       businessSubdomain: document.businessSubdomain,
       businessPath: document.businessPath,
       legalLevel: document.legalLevel,
-      legalPath: document.legalPath
+      legalPath: document.legalPath,
+      attachments: this.serializeAttachments(document.attachments)
     };
 
     const version = await this.versionRepository.save(
@@ -1252,6 +1397,7 @@ export class DocumentService implements OnModuleInit {
     return {
       rootDir,
       sourceDir: join(rootDir, "source"),
+      attachmentDir: join(rootDir, "attachments"),
       markdownPath: join(rootDir, "content.md"),
       rawTextPath: join(rootDir, "content.txt"),
       previewHtmlPath: join(rootDir, "preview.html"),
@@ -1302,6 +1448,7 @@ export class DocumentService implements OnModuleInit {
             businessPath: document.businessPath,
             legalLevel: document.legalLevel,
             legalPath: document.legalPath,
+            attachments: this.serializeAttachments(document.attachments),
             currentVersion: document.currentVersion,
             latestVersionNo: latestVersion?.versionNo ?? document.currentVersion,
             sourceFilename: latestTask?.sourceFilename ?? null,
@@ -1326,6 +1473,7 @@ export class DocumentService implements OnModuleInit {
     return {
       rootDir: assetPaths.rootDir,
       sourceFiles,
+      attachmentsDir: await this.pathIfExists(assetPaths.attachmentDir),
       markdownPath: await this.pathIfExists(assetPaths.markdownPath),
       rawTextPath: await this.pathIfExists(assetPaths.rawTextPath),
       previewHtmlPath: await this.pathIfExists(assetPaths.previewHtmlPath),

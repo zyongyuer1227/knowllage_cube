@@ -28,7 +28,8 @@
 @page:right { @bottom-right { content: counter(page); } @bottom-left { content: none; } }
 
 body {
-  width: 210mm;
+  width: 156mm;
+  min-height: 225mm;
   margin: 0 auto;
   background: white;
   font-family: "FangSong", "仿宋", "STFangsong", serif;

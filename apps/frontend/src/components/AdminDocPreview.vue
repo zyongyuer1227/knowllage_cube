@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { marked } from "marked";
-import govDocCssSource from "../../../../static/css/cn-gov-doc.css?raw";
-import fangSongUrl from "../../../../static/fonts/FangSong.ttf?url";
-import kaiTiUrl from "../../../../static/fonts/KaiTi.ttf?url";
-import simHeiUrl from "../../../../static/fonts/SimHei.ttf?url";
-import xiaoBiaoSongUrl from "../../../../static/fonts/FZXBSJW.TTF?url";
+import {
+  previewFontCss,
+  previewGovDocCss,
+  renderMarkdownPreviewFragment
+} from "../lib/preview-render";
 
 const props = defineProps<{
   source: string;
@@ -20,76 +19,12 @@ const frame = ref<HTMLIFrameElement | null>(null);
 let frameScrollTicking = false;
 let pendingScrollRatio = 0;
 
-marked.setOptions({
-  breaks: true,
-  gfm: true
-});
-
-const fontCss = `
-@font-face {
-  font-family: "FangSong";
-  src: url("${fangSongUrl}") format("truetype");
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "KaiTi";
-  src: url("${kaiTiUrl}") format("truetype");
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "SimHei";
-  src: url("${simHeiUrl}") format("truetype");
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "FZXBSJW";
-  src: url("${xiaoBiaoSongUrl}") format("truetype");
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "FZXiaoBiaoSong-B05S";
-  src: url("${xiaoBiaoSongUrl}") format("truetype");
-  font-display: swap;
-}
-`;
-
-const govDocCss = govDocCssSource.replace(/@import\s+url\((['"])\.\/font\.css\1\);?/gi, "");
-
-function normalizeImageMarkup(html: string) {
-  return html.replace(/<img\b([^>]*?)\swidth="(\d+(?:\.\d+)?%)"([^>]*?)>/gi, (_, before, width, after) => {
-    const existingStyleMatch = `${before} ${after}`.match(/\sstyle="([^"]*)"/i);
-    const existingStyle = existingStyleMatch?.[1]?.trim() ?? "";
-    const mergedStyle = [existingStyle.replace(/;$/, ""), `width: ${width}`].filter(Boolean).join("; ");
-    const withoutStyle = `${before} ${after}`.replace(/\sstyle="[^"]*"/gi, "");
-    return `<img${withoutStyle} style="${mergedStyle}">`;
-  });
-}
-
-function preprocessMarkdownSource(source: string) {
-  return (source ?? "")
-    .replace(/\r/g, "")
-    .replace(/^(>\s+)(\([a-zA-Z0-9]+\)|（[一二三四五六七八九十]+）|[a-zA-Z0-9]+\.)/gm, "$2");
-}
-
-function normalizePreviewMarkup(html: string) {
-  return html
-    .replace(/<p><strong>([^<]+[：:])<\/strong>/g, '<p class="doc-meta"><strong>$1</strong>')
-    .replace(/<blockquote>\s*<p>/g, '<blockquote class="doc-quote"><p class="doc-quote-line">')
-    .replace(/<\/p>\s*<\/blockquote>/g, "</p></blockquote>");
-}
-
 const srcdoc = computed(() => {
-  if ((props.persistedHtml ?? "").trim()) {
+  if (!(props.source ?? "").trim() && (props.persistedHtml ?? "").trim()) {
     return props.persistedHtml ?? "";
   }
 
-  const rendered = normalizePreviewMarkup(
-    normalizeImageMarkup(marked.parse(preprocessMarkdownSource(props.source ?? "")) as string)
-  );
+  const rendered = renderMarkdownPreviewFragment(props.source ?? "");
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -97,10 +32,10 @@ const srcdoc = computed(() => {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-${fontCss}
+${previewFontCss}
     </style>
     <style>
-${govDocCss}
+${previewGovDocCss}
     </style>
     <style>
       html {

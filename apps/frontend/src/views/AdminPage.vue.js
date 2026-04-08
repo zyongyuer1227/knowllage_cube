@@ -18,6 +18,10 @@ const settingsBusy = ref(false);
 const formatBusy = ref(false);
 const formatProgress = ref(0);
 const formatStageLabel = ref("");
+const attachmentBusy = ref(false);
+const attachmentInput = ref(null);
+const attachmentDownloadId = ref("");
+const showAttachments = ref(false);
 const markdownTextarea = ref(null);
 const previewFrame = ref(null);
 const syncSource = ref(null);
@@ -26,8 +30,6 @@ const showTaxonomySettings = ref(false);
 const taxonomyBusy = ref(false);
 const taxonomyBusinessPathsText = ref("");
 const taxonomyLegalPathsText = ref("");
-const activeBusinessPath = ref([]);
-const activeLegalLevel = ref("");
 const settingsDialogPosition = ref({ x: 0, y: 0 });
 const settingsDialogDragging = ref(false);
 const settingsDialogDragStart = ref({ x: 0, y: 0, pointerX: 0, pointerY: 0 });
@@ -68,24 +70,19 @@ const businessLevel3Options = computed(() => workspace.getBusinessPathOptions(wo
 const legalLevel1Options = computed(() => workspace.getLegalPathOptions([], 0));
 const legalLevel2Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 1));
 const legalLevel3Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 2));
-const legalTabs = computed(() => workspace.documentTaxonomy.legalLevels.map((item) => item.name));
-const businessRoots = computed(() => workspace.documentTaxonomy.businessDomains);
 const filteredDocs = computed(() => {
     const keyword = search.value.trim().toLowerCase();
     return workspace.docs.filter((doc) => {
-        const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-        const matchesBusiness = activeBusinessPath.value.length === 0 ||
-            activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
         const matchesKeyword = !keyword ||
             doc.title.toLowerCase().includes(keyword) ||
             doc.businessPath.join("/").toLowerCase().includes(keyword) ||
             doc.legalPath.join("/").toLowerCase().includes(keyword);
-        return matchesLegal && matchesBusiness && matchesKeyword;
+        return matchesKeyword;
     });
 });
 const selectedCount = computed(() => selectedDocumentIds.value.length);
-const activeBusinessSummary = computed(() => activeBusinessPath.value.join(" / ") || "全部业务领域");
-const activeLegalSummary = computed(() => activeLegalLevel.value || "全部效力层级");
+const activeAttachments = computed(() => workspace.activeDocument?.attachments ?? []);
+const activePersistedDocumentId = computed(() => (/^\d+$/.test(workspace.activeDocument?.id ?? "") ? workspace.activeDocument.id : ""));
 function toggleDocumentSelection(doc) {
     if (selectedDocumentIds.value.includes(doc.id)) {
         selectedDocumentIds.value = selectedDocumentIds.value.filter((id) => id !== doc.id);
@@ -95,44 +92,6 @@ function toggleDocumentSelection(doc) {
 }
 function clearSelection() {
     selectedDocumentIds.value = [];
-}
-function setLegalLevel(level) {
-    activeLegalLevel.value = level;
-}
-function selectBusinessPath(path) {
-    activeBusinessPath.value = path;
-}
-function clearBusinessPath() {
-    activeBusinessPath.value = [];
-}
-function countDocsForLegal(level) {
-    return workspace.docs.filter((doc) => {
-        const matchesLegal = doc.legalPath[0] === level;
-        const matchesBusiness = activeBusinessPath.value.length === 0 ||
-            activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-        return matchesLegal && matchesBusiness;
-    }).length;
-}
-function countDocsForBusiness(path) {
-    return workspace.docs.filter((doc) => {
-        const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
-        const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-        return matchesPath && matchesLegal;
-    }).length;
-}
-function countDocsForAllLegal() {
-    return workspace.docs.filter((doc) => {
-        return activeBusinessPath.value.length === 0 ||
-            activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-    }).length;
-}
-function countDocsForAllBusiness() {
-    return workspace.docs.filter((doc) => {
-        return !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    }).length;
-}
-function isBusinessPathActive(path) {
-    return path.length === activeBusinessPath.value.length && path.every((segment, index) => activeBusinessPath.value[index] === segment);
 }
 function withScrollSyncLock(source, callback) {
     syncSource.value = source;
@@ -469,6 +428,84 @@ async function deleteSelectedDocuments() {
         statusMessage.value = error instanceof Error ? error.message : "批量删除失败";
     }
 }
+function formatFileSize(size) {
+    if (size >= 1024 * 1024) {
+        return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+    if (size >= 1024) {
+        return `${Math.round(size / 1024)} KB`;
+    }
+    return `${size} B`;
+}
+function openAttachmentPicker() {
+    if (!activePersistedDocumentId.value || attachmentBusy.value || workspace.activeDocumentLoading) {
+        return;
+    }
+    attachmentInput.value?.click();
+    showAttachments.value = true;
+}
+async function handleAttachmentSelected(event) {
+    const input = event.target;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file || !auth.token || !activePersistedDocumentId.value) {
+        return;
+    }
+    attachmentBusy.value = true;
+    try {
+        await workspace.uploadAttachment(auth.token, activePersistedDocumentId.value, file);
+        statusMessage.value = `已添加附件：${file.name}`;
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "附件上传失败";
+    }
+    finally {
+        attachmentBusy.value = false;
+    }
+}
+async function downloadAttachment(attachmentId, fileName) {
+    if (!auth.token || !activePersistedDocumentId.value) {
+        return;
+    }
+    attachmentDownloadId.value = attachmentId;
+    try {
+        const blob = await api.downloadDocumentAttachment(activePersistedDocumentId.value, attachmentId, auth.token);
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "附件下载失败";
+    }
+    finally {
+        attachmentDownloadId.value = "";
+    }
+}
+async function removeAttachment(attachmentId, fileName) {
+    if (!auth.token || !activePersistedDocumentId.value || attachmentBusy.value) {
+        return;
+    }
+    const confirmed = window.confirm(`确认删除附件“${fileName}”吗？`);
+    if (!confirmed) {
+        return;
+    }
+    attachmentBusy.value = true;
+    try {
+        await workspace.deleteAttachment(auth.token, activePersistedDocumentId.value, attachmentId);
+        statusMessage.value = `已删除附件：${fileName}`;
+    }
+    catch (error) {
+        statusMessage.value = error instanceof Error ? error.message : "附件删除失败";
+    }
+    finally {
+        attachmentBusy.value = false;
+    }
+}
 watch(() => workspace.docs.map((doc) => doc.id), (ids) => {
     selectedDocumentIds.value = selectedDocumentIds.value.filter((id) => ids.includes(id));
 }, { immediate: true });
@@ -477,6 +514,8 @@ watch(() => workspace.activeId, async () => {
     setEditorScrollRatio(0);
     previewFrame.value?.setScrollRatio(0);
     closeAttributes();
+    showAttachments.value = false;
+    attachmentInput.value && (attachmentInput.value.value = "");
 });
 watch(filteredDocs, (docs) => {
     if (docs.length === 0) {
@@ -507,19 +546,7 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
 /** @type {__VLS_StyleScopedClasses['search-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['search-box']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-pill']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-pill']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-pill']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-all']} */ ;
-/** @type {__VLS_StyleScopedClasses['active']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['active']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['active']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-all']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-item']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-item']} */ ;
@@ -535,6 +562,14 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-body']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-item']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-popover-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
@@ -671,39 +706,6 @@ else {
         placeholder: "搜索标题、业务领域、效力层级...",
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "admin-legal-nav" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (...[$event]) => {
-                if (!!(!__VLS_ctx.auth.isLoggedIn))
-                    return;
-                __VLS_ctx.setLegalLevel('');
-            } },
-        type: "button",
-        ...{ class: "admin-legal-pill" },
-        ...{ class: ({ active: !__VLS_ctx.activeLegalLevel }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-    (__VLS_ctx.countDocsForAllLegal());
-    for (const [level] of __VLS_getVForSourceType((__VLS_ctx.legalTabs))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.auth.isLoggedIn))
-                        return;
-                    __VLS_ctx.setLegalLevel(level);
-                } },
-            key: (level),
-            type: "button",
-            ...{ class: "admin-legal-pill" },
-            ...{ class: ({ active: __VLS_ctx.activeLegalLevel === level }) },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        (level);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.countDocsForLegal(level));
-    }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "pane-tools" },
         ...{ class: ({ active: __VLS_ctx.workspace.loading || __VLS_ctx.selectedCount > 0 }) },
     });
@@ -758,79 +760,12 @@ else {
         ...{ class: "folder-tree admin-doc-browser" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "admin-business-filter" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (__VLS_ctx.clearBusinessPath) },
-        type: "button",
-        ...{ class: "admin-business-all" },
-        ...{ class: ({ active: __VLS_ctx.activeBusinessPath.length === 0 }) },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-    (__VLS_ctx.countDocsForAllBusiness());
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "admin-business-tree" },
-    });
-    for (const [node] of __VLS_getVForSourceType((__VLS_ctx.businessRoots))) {
-        (node.name);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!!(!__VLS_ctx.auth.isLoggedIn))
-                        return;
-                    __VLS_ctx.selectBusinessPath([node.name]);
-                } },
-            type: "button",
-            ...{ class: "admin-business-item" },
-            ...{ class: ({ active: __VLS_ctx.isBusinessPathActive([node.name]) }) },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        (node.name);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.countDocsForBusiness([node.name]));
-        for (const [child] of __VLS_getVForSourceType((node.children))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.auth.isLoggedIn))
-                            return;
-                        __VLS_ctx.selectBusinessPath([node.name, child.name]);
-                    } },
-                key: (`${node.name}/${child.name}`),
-                type: "button",
-                ...{ class: "admin-business-item child" },
-                ...{ class: ({ active: __VLS_ctx.isBusinessPathActive([node.name, child.name]) }) },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (child.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            (__VLS_ctx.countDocsForBusiness([node.name, child.name]));
-        }
-        for (const [child] of __VLS_getVForSourceType((node.children.flatMap((item) => item.children.map((grandchild) => ({ parent: item.name, name: grandchild.name })))))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-                ...{ onClick: (...[$event]) => {
-                        if (!!(!__VLS_ctx.auth.isLoggedIn))
-                            return;
-                        __VLS_ctx.selectBusinessPath([node.name, child.parent, child.name]);
-                    } },
-                key: (`${node.name}/${child.parent}/${child.name}`),
-                type: "button",
-                ...{ class: "admin-business-item grandchild" },
-                ...{ class: ({ active: __VLS_ctx.isBusinessPathActive([node.name, child.parent, child.name]) }) },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (child.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            (__VLS_ctx.countDocsForBusiness([node.name, child.parent, child.name]));
-        }
-    }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "admin-doc-list" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "admin-doc-list-header" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    (__VLS_ctx.activeLegalSummary);
     __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
     (__VLS_ctx.filteredDocs.length);
     for (const [doc] of __VLS_getVForSourceType((__VLS_ctx.filteredDocs))) {
@@ -931,6 +866,14 @@ else {
     }, ...__VLS_functionalComponentArgsRest(__VLS_15));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.workspace.activeDocument?.title || "未选择文档");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onChange: (__VLS_ctx.handleAttachmentSelected) },
+        ref: "attachmentInput",
+        type: "file",
+        ...{ class: "attachment-input" },
+        disabled: (!__VLS_ctx.activePersistedDocumentId || __VLS_ctx.attachmentBusy || __VLS_ctx.workspace.activeDocumentLoading),
+    });
+    /** @type {typeof __VLS_ctx.attachmentInput} */ ;
     if (__VLS_ctx.workspace.activeDocument) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
             ...{ class: "editor-body" },
@@ -973,6 +916,33 @@ else {
             fixedWidth: true,
         }, ...__VLS_functionalComponentArgsRest(__VLS_18));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "panel-title-actions" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!!(!__VLS_ctx.auth.isLoggedIn))
+                        return;
+                    if (!(__VLS_ctx.workspace.activeDocument))
+                        return;
+                    __VLS_ctx.showAttachments = !__VLS_ctx.showAttachments;
+                } },
+            type: "button",
+            ...{ class: "subtle-btn header-attachment-btn" },
+            disabled: (!__VLS_ctx.activePersistedDocumentId || __VLS_ctx.attachmentBusy || __VLS_ctx.workspace.activeDocumentLoading),
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_21 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "paperclip",
+            fixedWidth: true,
+        }));
+        const __VLS_22 = __VLS_21({
+            name: "paperclip",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_21));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.attachmentBusy ? "处理中..." : "附件");
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.normalizeMarkdown) },
             type: "button",
@@ -981,16 +951,129 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_21 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_24 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "wand-magic-sparkles",
             fixedWidth: true,
         }));
-        const __VLS_22 = __VLS_21({
+        const __VLS_25 = __VLS_24({
             name: "wand-magic-sparkles",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_21));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_24));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.formatBusy ? "大模型处理中..." : "一键转换md格式");
+        if (__VLS_ctx.showAttachments) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "attachment-popover" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "attachment-popover-header" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (__VLS_ctx.openAttachmentPicker) },
+                type: "button",
+                ...{ class: "subtle-btn" },
+                disabled: (!__VLS_ctx.activePersistedDocumentId || __VLS_ctx.attachmentBusy || __VLS_ctx.workspace.activeDocumentLoading),
+            });
+            /** @type {[typeof FaIcon, ]} */ ;
+            // @ts-ignore
+            const __VLS_27 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+                name: "paperclip",
+                fixedWidth: true,
+            }));
+            const __VLS_28 = __VLS_27({
+                name: "paperclip",
+                fixedWidth: true,
+            }, ...__VLS_functionalComponentArgsRest(__VLS_27));
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            if (__VLS_ctx.activePersistedDocumentId) {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "attachment-list" },
+                });
+                if (__VLS_ctx.activeAttachments.length === 0) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        ...{ class: "attachment-empty compact" },
+                    });
+                }
+                for (const [attachment] of __VLS_getVForSourceType((__VLS_ctx.activeAttachments))) {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        key: (attachment.id),
+                        ...{ class: "attachment-item compact" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        ...{ class: "attachment-copy" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+                    (attachment.displayName);
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                    (__VLS_ctx.formatFileSize(attachment.size));
+                    (attachment.uploadedAt.slice(0, 10));
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        ...{ class: "attachment-actions" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!!(!__VLS_ctx.auth.isLoggedIn))
+                                    return;
+                                if (!(__VLS_ctx.workspace.activeDocument))
+                                    return;
+                                if (!(__VLS_ctx.showAttachments))
+                                    return;
+                                if (!(__VLS_ctx.activePersistedDocumentId))
+                                    return;
+                                __VLS_ctx.downloadAttachment(attachment.id, attachment.displayName || attachment.fileName);
+                            } },
+                        type: "button",
+                        ...{ class: "subtle-btn" },
+                        disabled: (__VLS_ctx.attachmentDownloadId === attachment.id),
+                    });
+                    /** @type {[typeof FaIcon, ]} */ ;
+                    // @ts-ignore
+                    const __VLS_30 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+                        name: "download",
+                        fixedWidth: true,
+                    }));
+                    const __VLS_31 = __VLS_30({
+                        name: "download",
+                        fixedWidth: true,
+                    }, ...__VLS_functionalComponentArgsRest(__VLS_30));
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                    (__VLS_ctx.attachmentDownloadId === attachment.id ? "下载中..." : "下载");
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!!(!__VLS_ctx.auth.isLoggedIn))
+                                    return;
+                                if (!(__VLS_ctx.workspace.activeDocument))
+                                    return;
+                                if (!(__VLS_ctx.showAttachments))
+                                    return;
+                                if (!(__VLS_ctx.activePersistedDocumentId))
+                                    return;
+                                __VLS_ctx.removeAttachment(attachment.id, attachment.displayName || attachment.fileName);
+                            } },
+                        type: "button",
+                        ...{ class: "subtle-btn danger-text" },
+                        disabled: (__VLS_ctx.attachmentBusy),
+                    });
+                    /** @type {[typeof FaIcon, ]} */ ;
+                    // @ts-ignore
+                    const __VLS_33 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+                        name: "trash-can",
+                        fixedWidth: true,
+                    }));
+                    const __VLS_34 = __VLS_33({
+                        name: "trash-can",
+                        fixedWidth: true,
+                    }, ...__VLS_functionalComponentArgsRest(__VLS_33));
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+                }
+            }
+            else {
+                __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                    ...{ class: "attachment-empty compact" },
+                });
+            }
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
             ...{ class: "editor-field" },
         });
@@ -1009,14 +1092,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_24 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_36 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "eye",
             fixedWidth: true,
         }));
-        const __VLS_25 = __VLS_24({
+        const __VLS_37 = __VLS_36({
             name: "eye",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_24));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_36));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "preview-surface" },
@@ -1027,41 +1110,41 @@ else {
             });
             /** @type {[typeof FaIcon, ]} */ ;
             // @ts-ignore
-            const __VLS_27 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            const __VLS_39 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
                 name: "spinner",
                 fixedWidth: true,
                 ...{ class: "spin" },
             }));
-            const __VLS_28 = __VLS_27({
+            const __VLS_40 = __VLS_39({
                 name: "spinner",
                 fixedWidth: true,
                 ...{ class: "spin" },
-            }, ...__VLS_functionalComponentArgsRest(__VLS_27));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_39));
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         }
         /** @type {[typeof AdminDocPreview, ]} */ ;
         // @ts-ignore
-        const __VLS_30 = __VLS_asFunctionalComponent(AdminDocPreview, new AdminDocPreview({
+        const __VLS_42 = __VLS_asFunctionalComponent(AdminDocPreview, new AdminDocPreview({
             ...{ 'onScrollRatio': {} },
             ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
             persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
         }));
-        const __VLS_31 = __VLS_30({
+        const __VLS_43 = __VLS_42({
             ...{ 'onScrollRatio': {} },
             ref: "previewFrame",
             source: (__VLS_ctx.workspace.editorMarkdown),
             persistedHtml: (__VLS_ctx.workspace.activeDocument.previewHtml),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_30));
-        let __VLS_33;
-        let __VLS_34;
-        let __VLS_35;
-        const __VLS_36 = {
+        }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+        let __VLS_45;
+        let __VLS_46;
+        let __VLS_47;
+        const __VLS_48 = {
             onScrollRatio: (__VLS_ctx.syncEditorFromPreview)
         };
         /** @type {typeof __VLS_ctx.previewFrame} */ ;
-        var __VLS_37 = {};
-        var __VLS_32;
+        var __VLS_49 = {};
+        var __VLS_44;
         __VLS_asFunctionalElement(__VLS_intrinsicElements.footer, __VLS_intrinsicElements.footer)({
             ...{ class: "editor-footer" },
         });
@@ -1100,14 +1183,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_39 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "sliders",
             fixedWidth: true,
         }));
-        const __VLS_40 = __VLS_39({
+        const __VLS_52 = __VLS_51({
             name: "sliders",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_39));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_51));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
             ...{ class: "editor-actions" },
@@ -1119,14 +1202,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_42 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "sitemap",
             fixedWidth: true,
         }));
-        const __VLS_43 = __VLS_42({
+        const __VLS_55 = __VLS_54({
             name: "sitemap",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_54));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.openAttributes) },
@@ -1136,14 +1219,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_45 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_57 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "tags",
             fixedWidth: true,
         }));
-        const __VLS_46 = __VLS_45({
+        const __VLS_58 = __VLS_57({
             name: "tags",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_45));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_57));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (__VLS_ctx.saveCurrentDocument) },
@@ -1152,14 +1235,14 @@ else {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_48 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_60 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "floppy-disk",
             fixedWidth: true,
         }));
-        const __VLS_49 = __VLS_48({
+        const __VLS_61 = __VLS_60({
             name: "floppy-disk",
             fixedWidth: true,
-        }, ...__VLS_functionalComponentArgsRest(__VLS_48));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_60));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
         (__VLS_ctx.workspace.saving ? "保存中..." : "保存源码");
     }
@@ -1193,14 +1276,14 @@ if (__VLS_ctx.showAttributes) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_63 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "xmark",
         fixedWidth: true,
     }));
-    const __VLS_52 = __VLS_51({
+    const __VLS_64 = __VLS_63({
         name: "xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_63));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "settings-form" },
     });
@@ -1354,14 +1437,14 @@ if (__VLS_ctx.showAttributes) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_66 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "floppy-disk",
         fixedWidth: true,
     }));
-    const __VLS_55 = __VLS_54({
+    const __VLS_67 = __VLS_66({
         name: "floppy-disk",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_54));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_66));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.workspace.saving ? "保存中..." : "保存属性");
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
@@ -1393,14 +1476,14 @@ if (__VLS_ctx.showTaxonomySettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_57 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_69 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "xmark",
         fixedWidth: true,
     }));
-    const __VLS_58 = __VLS_57({
+    const __VLS_70 = __VLS_69({
         name: "xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_57));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_69));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "taxonomy-grid" },
     });
@@ -1454,14 +1537,14 @@ if (__VLS_ctx.showTaxonomySettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_60 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_72 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "floppy-disk",
         fixedWidth: true,
     }));
-    const __VLS_61 = __VLS_60({
+    const __VLS_73 = __VLS_72({
         name: "floppy-disk",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_60));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_72));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.taxonomyBusy ? "保存中..." : "保存属性体系");
 }
@@ -1499,14 +1582,14 @@ if (__VLS_ctx.showSettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_63 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_75 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "arrows-up-down-left-right",
         fixedWidth: true,
     }));
-    const __VLS_64 = __VLS_63({
+    const __VLS_76 = __VLS_75({
         name: "arrows-up-down-left-right",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_63));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_75));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.closeSettings) },
@@ -1515,14 +1598,14 @@ if (__VLS_ctx.showSettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_66 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_78 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "xmark",
         fixedWidth: true,
     }));
-    const __VLS_67 = __VLS_66({
+    const __VLS_79 = __VLS_78({
         name: "xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_66));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_78));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "settings-scroll" },
     });
@@ -1728,14 +1811,14 @@ if (__VLS_ctx.showSettings) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_69 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_81 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "floppy-disk",
         fixedWidth: true,
     }));
-    const __VLS_70 = __VLS_69({
+    const __VLS_82 = __VLS_81({
         name: "floppy-disk",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_69));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_81));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.settingsBusy ? "保存中..." : "确定并保存");
 }
@@ -1751,9 +1834,6 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['pane-eyebrow']} */ ;
 /** @type {__VLS_StyleScopedClasses['search-box']} */ ;
 /** @type {__VLS_StyleScopedClasses['search-icon']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-nav']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-pill']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-legal-pill']} */ ;
 /** @type {__VLS_StyleScopedClasses['pane-tools']} */ ;
 /** @type {__VLS_StyleScopedClasses['status']} */ ;
 /** @type {__VLS_StyleScopedClasses['tree-actions']} */ ;
@@ -1762,14 +1842,6 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['folder-tree']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-browser']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-filter']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-all']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-tree']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['child']} */ ;
-/** @type {__VLS_StyleScopedClasses['admin-business-item']} */ ;
-/** @type {__VLS_StyleScopedClasses['grandchild']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-list-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['admin-doc-item']} */ ;
@@ -1789,6 +1861,7 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['editor-topline']} */ ;
 /** @type {__VLS_StyleScopedClasses['tab']} */ ;
 /** @type {__VLS_StyleScopedClasses['active']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-input']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-body']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-fields']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-split']} */ ;
@@ -1796,8 +1869,26 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title-main']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-title-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['header-attachment-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['convert-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-popover']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-popover-header']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-list']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-item']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['subtle-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['danger-text']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-empty']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact']} */ ;
 /** @type {__VLS_StyleScopedClasses['editor-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-title']} */ ;
@@ -1900,7 +1991,7 @@ if (__VLS_ctx.showSettings) {
 /** @type {__VLS_StyleScopedClasses['save-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary-strong-btn']} */ ;
 // @ts-ignore
-var __VLS_38 = __VLS_37;
+var __VLS_50 = __VLS_49;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -1918,6 +2009,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             formatBusy: formatBusy,
             formatProgress: formatProgress,
             formatStageLabel: formatStageLabel,
+            attachmentBusy: attachmentBusy,
+            attachmentInput: attachmentInput,
+            attachmentDownloadId: attachmentDownloadId,
+            showAttachments: showAttachments,
             markdownTextarea: markdownTextarea,
             previewFrame: previewFrame,
             showAttributes: showAttributes,
@@ -1925,8 +2020,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             taxonomyBusy: taxonomyBusy,
             taxonomyBusinessPathsText: taxonomyBusinessPathsText,
             taxonomyLegalPathsText: taxonomyLegalPathsText,
-            activeBusinessPath: activeBusinessPath,
-            activeLegalLevel: activeLegalLevel,
             settingsDialogPosition: settingsDialogPosition,
             settingsDialogDragging: settingsDialogDragging,
             settingsForm: settingsForm,
@@ -1935,21 +2028,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             businessLevel3Options: businessLevel3Options,
             legalLevel2Options: legalLevel2Options,
             legalLevel3Options: legalLevel3Options,
-            legalTabs: legalTabs,
-            businessRoots: businessRoots,
             filteredDocs: filteredDocs,
             selectedCount: selectedCount,
-            activeLegalSummary: activeLegalSummary,
+            activeAttachments: activeAttachments,
+            activePersistedDocumentId: activePersistedDocumentId,
             toggleDocumentSelection: toggleDocumentSelection,
             clearSelection: clearSelection,
-            setLegalLevel: setLegalLevel,
-            selectBusinessPath: selectBusinessPath,
-            clearBusinessPath: clearBusinessPath,
-            countDocsForLegal: countDocsForLegal,
-            countDocsForBusiness: countDocsForBusiness,
-            countDocsForAllLegal: countDocsForAllLegal,
-            countDocsForAllBusiness: countDocsForAllBusiness,
-            isBusinessPathActive: isBusinessPathActive,
             syncPreviewFromEditor: syncPreviewFromEditor,
             syncEditorFromPreview: syncEditorFromPreview,
             login: login,
@@ -1971,6 +2055,11 @@ const __VLS_self = (await import('vue')).defineComponent({
             deleteDocument: deleteDocument,
             selectDocument: selectDocument,
             deleteSelectedDocuments: deleteSelectedDocuments,
+            formatFileSize: formatFileSize,
+            openAttachmentPicker: openAttachmentPicker,
+            handleAttachmentSelected: handleAttachmentSelected,
+            downloadAttachment: downloadAttachment,
+            removeAttachment: removeAttachment,
         };
     },
 });

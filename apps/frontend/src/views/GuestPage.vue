@@ -1,20 +1,26 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
 import GuestDocPreview from "../components/GuestDocPreview.vue";
 import type { DocumentTaxonomyNode } from "../lib/document-taxonomy";
 import { api } from "../lib/api";
-import { useWorkspaceStore, type WorkspaceDoc } from "../stores/workspace";
+import { useWorkspaceStore, type WorkspaceAttachment, type WorkspaceDoc } from "../stores/workspace";
 
 const workspace = useWorkspaceStore();
 
 const search = ref("");
 const sidebarCollapsed = ref(false);
+const resultsCollapsed = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
+const searchBusy = ref(false);
+const searchError = ref("");
+const previewFrame = ref<InstanceType<typeof GuestDocPreview> | null>(null);
 const activeBusinessPath = ref<string[]>([]);
 const activeLegalLevel = ref("");
 const expandedBusinessKeys = ref<string[]>([]);
+let searchTimer = 0;
+let activeSearchToken = 0;
 
 const legalTabs = computed(() => workspace.documentTaxonomy.legalLevels.map((item) => item.name));
 
@@ -22,25 +28,13 @@ const businessRoots = computed(() => workspace.documentTaxonomy.businessDomains)
 
 const documentTotal = computed(() => workspace.docs.length);
 
-function docMatchesKeyword(doc: WorkspaceDoc) {
-  const keyword = search.value.trim().toLowerCase();
-  return (
-    !keyword ||
-    doc.title.toLowerCase().includes(keyword) ||
-    doc.businessPath.join("/").toLowerCase().includes(keyword) ||
-    doc.legalPath.join("/").toLowerCase().includes(keyword) ||
-    doc.archivePath.toLowerCase().includes(keyword)
-  );
-}
-
 const filteredDocs = computed(() => {
   return workspace.docs.filter((doc) => {
     const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
     const matchesBusiness =
       activeBusinessPath.value.length === 0 ||
       activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-    const matchesKeyword = docMatchesKeyword(doc);
-    return matchesLegal && matchesBusiness && matchesKeyword;
+    return matchesLegal && matchesBusiness;
   });
 });
 
@@ -54,8 +48,8 @@ const activeFilteredDocument = computed(() => {
     return filteredDocs.value[0] ?? null;
   }
   return {
-    ...matched,
-    ...doc
+    ...doc,
+    searchSnippet: matched.searchSnippet
   };
 });
 
@@ -74,6 +68,8 @@ const activeResultMeta = computed(() => {
   ].filter(Boolean);
 });
 
+const activeAttachments = computed(() => activeFilteredDocument.value?.attachments ?? []);
+
 function makeBusinessKey(path: string[]) {
   return path.join("/");
 }
@@ -82,7 +78,7 @@ function countDocsForBusiness(path: string[]) {
   return workspace.docs.filter((doc) => {
     const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
     const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    return matchesPath && matchesLegal && docMatchesKeyword(doc);
+    return matchesPath && matchesLegal;
   }).length;
 }
 
@@ -92,7 +88,7 @@ function countDocsForLegal(level: string) {
     const matchesBusiness =
       activeBusinessPath.value.length === 0 ||
       activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-    return matchesLegal && matchesBusiness && docMatchesKeyword(doc);
+    return matchesLegal && matchesBusiness;
   }).length;
 }
 
@@ -101,14 +97,14 @@ function countDocsForAllLegal() {
     const matchesBusiness =
       activeBusinessPath.value.length === 0 ||
       activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-    return matchesBusiness && docMatchesKeyword(doc);
+    return matchesBusiness;
   }).length;
 }
 
 function countDocsForAllBusiness() {
   return workspace.docs.filter((doc) => {
     const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    return matchesLegal && docMatchesKeyword(doc);
+    return matchesLegal;
   }).length;
 }
 
@@ -147,6 +143,10 @@ function setLegalLevel(level: string) {
   activeLegalLevel.value = level;
 }
 
+function clearSearch() {
+  search.value = "";
+}
+
 function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -163,12 +163,49 @@ function summarizePath(path: string[]) {
   return path.join(" / ") || "未设置";
 }
 
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderHighlightedSnippet(value: string) {
+  const snippet = value ?? "";
+  const keyword = search.value.trim();
+  const escapedSnippet = escapeHtml(snippet);
+  if (!keyword) {
+    return escapedSnippet;
+  }
+  const escapedKeyword = escapeHtml(keyword).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return escapedSnippet.replace(new RegExp(escapedKeyword, "gi"), (match) => `<mark class="result-hit">${match}</mark>`);
+}
+
 async function selectDocument(doc: WorkspaceDoc) {
   workspace.setActive(doc.id);
   try {
     await workspace.loadDocumentDetail(doc.id);
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : "加载文档失败";
+  }
+}
+
+async function triggerSearch(query: string) {
+  const ticket = ++activeSearchToken;
+  searchBusy.value = true;
+  searchError.value = "";
+  try {
+    await workspace.searchPublicDocuments(query);
+  } catch (error) {
+    if (ticket === activeSearchToken) {
+      searchError.value = error instanceof Error ? error.message : "检索失败";
+    }
+  } finally {
+    if (ticket === activeSearchToken) {
+      searchBusy.value = false;
+    }
   }
 }
 
@@ -192,6 +229,16 @@ watch(
 );
 
 watch(
+  search,
+  (value) => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      void triggerSearch(value);
+    }, value.trim() ? 260 : 0);
+  }
+);
+
+watch(
   filteredDocs,
   (docs) => {
     const current = workspace.activeDocument;
@@ -208,6 +255,10 @@ watch(
 onMounted(async () => {
   workspace.ensureInitialized();
   await workspace.loadPublicWorkspace();
+});
+
+onBeforeUnmount(() => {
+  window.clearTimeout(searchTimer);
 });
 
 async function exportCurrentDocument() {
@@ -239,17 +290,55 @@ function businessNodeHasMatches(path: string[]) {
   return workspace.docs.some((doc) => {
     const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
     const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-    return matchesPath && matchesLegal && docMatchesKeyword(doc);
+    return matchesPath && matchesLegal;
   });
 }
 
 function isDocumentActive(doc: WorkspaceDoc) {
   return activeFilteredDocument.value?.id === doc.id;
 }
+
+function jumpToNextMatch() {
+  previewFrame.value?.findNextMatch();
+}
+
+function jumpToPrevMatch() {
+  previewFrame.value?.findPrevMatch();
+}
+
+function formatFileSize(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${Math.round(size / 1024)} KB`;
+  }
+  return `${size} B`;
+}
+
+async function downloadAttachment(attachment: WorkspaceAttachment) {
+  const doc = activeFilteredDocument.value;
+  if (!doc || !/^\d+$/.test(doc.id)) {
+    return;
+  }
+  try {
+    const blob = await api.publicDownloadAttachment(doc.id, attachment.id);
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = attachment.displayName || attachment.fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : "附件下载失败";
+  }
+}
 </script>
 
 <template>
-  <section class="guest-shell" :class="{ collapsed: sidebarCollapsed }">
+  <section class="guest-shell" :class="{ collapsed: sidebarCollapsed, 'results-collapsed': resultsCollapsed }">
     <section class="filter-bar">
       <div class="filter-bar-main">
         <div class="filter-title">
@@ -262,7 +351,16 @@ function isDocumentActive(doc: WorkspaceDoc) {
 
         <label class="hero-search compact-search">
           <FaIcon name="magnifying-glass" fixed-width />
-          <input v-model="search" type="text" placeholder="搜索标题、业务领域、效力层级..." />
+          <input v-model="search" type="text" placeholder="搜索标题、业务领域、效力层级、正文内容..." />
+          <button
+            v-if="search.trim()"
+            type="button"
+            class="search-clear-btn"
+            aria-label="清空搜索"
+            @click.prevent="clearSearch"
+          >
+            <FaIcon name="xmark" fixed-width />
+          </button>
         </label>
 
         <nav class="legal-nav" aria-label="效力层级筛选">
@@ -401,7 +499,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
         </button>
       </aside>
 
-      <section class="results-panel">
+      <section v-if="!resultsCollapsed" class="results-panel">
         <div class="panel-card results-card">
           <div class="panel-header">
             <div>
@@ -411,8 +509,16 @@ function isDocumentActive(doc: WorkspaceDoc) {
                 <span>{{ activeLegalSummary }}</span>
               </h2>
             </div>
-            <span class="result-badge">{{ filteredDocs.length }} 条结果</span>
+            <div class="panel-header-actions">
+              <span v-if="searchBusy" class="result-badge">检索中...</span>
+              <span class="result-badge">{{ filteredDocs.length }} 条结果</span>
+              <button type="button" class="icon-btn" @click="resultsCollapsed = true" aria-label="收起结果列表">
+                <FaIcon name="angles-left" fixed-width />
+              </button>
+            </div>
           </div>
+
+          <p v-if="searchError" class="error-banner">{{ searchError }}</p>
 
           <div class="filter-summary">
             <span class="summary-chip">
@@ -441,6 +547,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
                 <strong>{{ doc.title }}</strong>
                 <p>{{ summarizePath(doc.legalPath) }}</p>
                 <span>{{ summarizePath(doc.businessPath) }}</span>
+                <small v-if="doc.searchSnippet" class="result-snippet" v-html="renderHighlightedSnippet(doc.searchSnippet)"></small>
               </div>
             </button>
 
@@ -452,6 +559,12 @@ function isDocumentActive(doc: WorkspaceDoc) {
           </div>
         </div>
       </section>
+      <aside v-else class="results-panel-collapsed">
+        <button type="button" class="collapsed-btn" @click="resultsCollapsed = false">
+          <FaIcon name="angles-right" fixed-width />
+          <span>结果</span>
+        </button>
+      </aside>
 
       <section class="preview-panel">
         <div class="panel-card preview-card">
@@ -463,8 +576,14 @@ function isDocumentActive(doc: WorkspaceDoc) {
                 <span>{{ activeFilteredDocument?.title || "未选择文档" }}</span>
               </h2>
             </div>
-            <div class="preview-meta">
-              <span v-for="item in activeResultMeta" :key="item">{{ item }}</span>
+            <div class="preview-side-meta">
+              <div v-if="search.trim()" class="match-nav">
+                <button type="button" class="mini-nav-btn" @click="jumpToPrevMatch">上一处</button>
+                <button type="button" class="mini-nav-btn" @click="jumpToNextMatch">下一处</button>
+              </div>
+              <div class="preview-meta">
+                <span v-for="item in activeResultMeta" :key="item">{{ item }}</span>
+              </div>
             </div>
           </div>
 
@@ -476,9 +595,27 @@ function isDocumentActive(doc: WorkspaceDoc) {
               <span>正在加载文档详情...</span>
             </div>
             <GuestDocPreview
+              ref="previewFrame"
               :source="activeFilteredDocument.markdownSource ?? ''"
               :persisted-html="activeFilteredDocument.previewHtml"
+              :highlight-term="search.trim()"
             />
+            <div v-if="activeAttachments.length > 0" class="attachment-strip attachment-footer">
+              <div class="attachment-footer-title">
+                <FaIcon name="paperclip" fixed-width />
+                <span>附件下载</span>
+              </div>
+              <button
+                v-for="attachment in activeAttachments"
+                :key="attachment.id"
+                type="button"
+                class="attachment-chip"
+                @click="downloadAttachment(attachment)"
+              >
+                <span>{{ attachment.displayName }}</span>
+                <small>{{ formatFileSize(attachment.size) }}</small>
+              </button>
+            </div>
           </div>
           <div v-else class="empty-preview">
             <FaIcon name="file-circle-xmark" fixed-width />
@@ -492,27 +629,23 @@ function isDocumentActive(doc: WorkspaceDoc) {
 
 <style scoped>
 .guest-shell {
-  --guest-page-bg: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--app-bg) 92%, var(--panel-bg) 8%) 0%,
-    color-mix(in srgb, var(--panel-bg) 86%, var(--app-bg) 14%) 100%
-  );
-  --guest-card-bg: color-mix(in srgb, var(--panel-muted-bg) 92%, var(--panel-bg) 8%);
-  --guest-card-bg-strong: color-mix(in srgb, var(--panel-bg) 86%, var(--panel-header-bg) 14%);
-  --guest-card-border: color-mix(in srgb, var(--border-color) 82%, transparent);
-  --guest-shadow: 0 8px 18px color-mix(in srgb, #000 10%, transparent);
-  --guest-surface: color-mix(in srgb, var(--panel-muted-bg) 94%, var(--topbar-bg) 6%);
-  --guest-surface-soft: color-mix(in srgb, var(--panel-header-bg) 86%, var(--panel-bg) 14%);
-  --guest-surface-strong: color-mix(in srgb, var(--button-bg) 92%, var(--panel-bg) 8%);
+  --guest-page-bg: var(--app-bg);
+  --guest-card-bg: var(--panel-bg);
+  --guest-card-bg-strong: var(--panel-bg);
+  --guest-card-border: var(--border-color);
+  --guest-shadow: none;
+  --guest-surface: var(--panel-bg);
+  --guest-surface-soft: var(--panel-header-bg);
+  --guest-surface-strong: var(--button-bg);
   --guest-text-strong: var(--text-primary);
   --guest-text: var(--text-secondary);
   --guest-text-muted: var(--text-muted);
   --guest-accent: var(--accent-bg);
-  --guest-accent-soft: color-mix(in srgb, var(--accent-bg) 12%, transparent);
-  --guest-accent-strong: color-mix(in srgb, var(--accent-bg) 82%, #0b5e95 18%);
+  --guest-accent-soft: color-mix(in srgb, var(--accent-bg) 10%, #ffffff 90%);
+  --guest-accent-strong: var(--accent-bg);
   --guest-accent-text: var(--accent-text);
-  --guest-badge-bg: color-mix(in srgb, var(--button-bg) 88%, var(--panel-header-bg) 12%);
-  --guest-badge-strong-bg: color-mix(in srgb, var(--panel-header-bg) 68%, var(--button-bg) 32%);
+  --guest-badge-bg: var(--panel-header-bg);
+  --guest-badge-strong-bg: var(--panel-header-bg);
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
@@ -525,6 +658,14 @@ function isDocumentActive(doc: WorkspaceDoc) {
 
 .guest-shell.collapsed .content-grid {
   grid-template-columns: 64px 360px minmax(0, 1fr);
+}
+
+.guest-shell.results-collapsed .content-grid {
+  grid-template-columns: 292px 64px minmax(0, 1fr);
+}
+
+.guest-shell.collapsed.results-collapsed .content-grid {
+  grid-template-columns: 64px 64px minmax(0, 1fr);
 }
 
 .filter-bar,
@@ -540,8 +681,8 @@ function isDocumentActive(doc: WorkspaceDoc) {
   justify-content: space-between;
   gap: 16px;
   padding: 8px 10px;
-  border-radius: 8px;
-  background: linear-gradient(180deg, var(--guest-card-bg), var(--guest-card-bg-strong));
+  border-radius: 4px;
+  background: var(--guest-card-bg);
 }
 
 .panel-eyebrow {
@@ -565,6 +706,8 @@ function isDocumentActive(doc: WorkspaceDoc) {
   display: grid;
   gap: 2px;
   padding: 0 6px;
+  justify-items: center;
+  text-align: center;
 }
 
 .filter-title strong {
@@ -573,18 +716,20 @@ function isDocumentActive(doc: WorkspaceDoc) {
   line-height: 1.1;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
 }
 
 .filter-title span {
   font-size: 11px;
   color: var(--guest-text-muted);
+  text-align: center;
 }
 
 .hero-search {
   min-height: 38px;
   padding: 0 12px;
-  border-radius: 6px;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -610,13 +755,32 @@ function isDocumentActive(doc: WorkspaceDoc) {
   outline: none;
 }
 
+.search-clear-btn {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--guest-surface-soft);
+  color: var(--guest-text-muted);
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.search-clear-btn:hover {
+  background: color-mix(in srgb, var(--guest-card-border) 78%, transparent);
+  color: var(--guest-text);
+}
+
 .hero-action {
   min-height: 38px;
   padding: 0 12px;
-  border: 1px solid var(--guest-card-border);
-  border-radius: 6px;
-  background: linear-gradient(135deg, var(--guest-surface), var(--guest-surface-soft));
-  color: var(--guest-text-strong);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--guest-accent);
+  color: var(--guest-accent-text);
   font: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -640,7 +804,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
   min-width: 0;
   min-height: 38px;
   padding: 4px;
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--guest-surface-soft);
   display: flex;
   align-items: center;
@@ -696,14 +860,15 @@ function isDocumentActive(doc: WorkspaceDoc) {
 .business-panel,
 .results-panel,
 .preview-panel,
-.business-panel-collapsed {
+.business-panel-collapsed,
+.results-panel-collapsed {
   min-height: 0;
 }
 
 .panel-card {
   height: 100%;
   min-height: 0;
-  border-radius: 8px;
+  border-radius: 4px;
   background: var(--guest-card-bg);
   display: grid;
   overflow: hidden;
@@ -716,7 +881,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
 }
 
 .preview-card {
-  background: linear-gradient(180deg, var(--guest-card-bg), var(--guest-card-bg-strong));
+  background: var(--guest-card-bg);
 }
 
 .panel-header {
@@ -725,6 +890,12 @@ function isDocumentActive(doc: WorkspaceDoc) {
   justify-content: space-between;
   gap: 14px;
   padding: 16px 16px 10px;
+}
+
+.panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .panel-header h2 {
@@ -772,7 +943,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
   min-height: 38px;
   padding: 0 12px;
   border: 1px solid var(--guest-card-border);
-  border-radius: 6px;
+  border-radius: 4px;
   background: var(--guest-surface);
   color: var(--guest-text-strong);
   display: flex;
@@ -931,20 +1102,23 @@ function isDocumentActive(doc: WorkspaceDoc) {
 }
 
 .results-list {
-  padding: 0 12px 16px;
+  padding: 0 12px 12px;
   display: grid;
-  gap: 2px;
+  gap: 0;
+  align-content: start;
+  grid-auto-rows: max-content;
 }
 
 .result-item {
   width: 100%;
-  padding: 8px 8px 8px 6px;
+  padding: 7px 4px 7px 2px;
   border: 0;
-  border-radius: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--guest-card-border) 72%, transparent);
+  border-radius: 0;
   background: transparent;
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
-  gap: 10px;
+  gap: 8px;
   cursor: pointer;
   text-align: left;
   align-items: start;
@@ -967,7 +1141,7 @@ function isDocumentActive(doc: WorkspaceDoc) {
 
 .result-copy {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -978,20 +1152,34 @@ function isDocumentActive(doc: WorkspaceDoc) {
 }
 
 .result-copy strong {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--guest-text-strong);
-  line-height: 1.35;
+  line-height: 1.25;
   font-weight: 600;
 }
 
 .result-copy p {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--guest-text);
 }
 
 .result-copy span {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--guest-text-muted);
+}
+
+.result-snippet {
+  margin: 1px 0 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--guest-text);
+}
+
+.result-snippet :deep(mark.result-hit) {
+  padding: 0 2px;
+  border-radius: 2px;
+  background: rgba(255, 213, 79, 0.82);
+  color: inherit;
 }
 
 .preview-header {
@@ -1004,6 +1192,30 @@ function isDocumentActive(doc: WorkspaceDoc) {
   justify-content: flex-end;
   gap: 8px;
   max-width: 420px;
+}
+
+.preview-side-meta {
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+}
+
+.match-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mini-nav-btn {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--guest-card-border);
+  border-radius: 4px;
+  background: var(--guest-surface);
+  color: var(--guest-text-strong);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .preview-meta span {
@@ -1019,6 +1231,48 @@ function isDocumentActive(doc: WorkspaceDoc) {
 
 .preview-body {
   padding: 0 12px 12px;
+}
+
+.attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 12px;
+}
+
+.attachment-footer {
+  margin-top: 12px;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--guest-card-border);
+}
+
+.attachment-footer-title {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--guest-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.attachment-chip {
+  border: 1px solid var(--guest-card-border);
+  background: var(--guest-surface);
+  color: var(--guest-text-strong);
+  border-radius: 4px;
+  min-height: 30px;
+  padding: 4px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.attachment-chip small {
+  color: var(--guest-text-muted);
 }
 
 .preview-loading {
@@ -1071,9 +1325,13 @@ function isDocumentActive(doc: WorkspaceDoc) {
   display: flex;
 }
 
+.results-panel-collapsed {
+  display: flex;
+}
+
 .collapsed-btn {
   width: 100%;
-  border-radius: 8px;
+  border-radius: 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1085,6 +1343,10 @@ function isDocumentActive(doc: WorkspaceDoc) {
 @media (max-width: 1360px) {
   .content-grid {
     grid-template-columns: 280px 320px minmax(0, 1fr);
+  }
+
+  .guest-shell.results-collapsed .content-grid {
+    grid-template-columns: 280px 64px minmax(0, 1fr);
   }
 }
 
@@ -1109,7 +1371,13 @@ function isDocumentActive(doc: WorkspaceDoc) {
     grid-template-columns: 1fr;
   }
 
-  .business-panel-collapsed {
+  .guest-shell.results-collapsed .content-grid,
+  .guest-shell.collapsed.results-collapsed .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .business-panel-collapsed,
+  .results-panel-collapsed {
     min-height: 76px;
   }
 

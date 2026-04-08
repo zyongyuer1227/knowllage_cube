@@ -108,6 +108,9 @@ export const api = {
   publicDocument(id: string) {
     return request<Record<string, unknown>>(`/public/documents/${id}`);
   },
+  publicDownloadAttachment(id: string, attachmentId: string) {
+    return request<Blob>(`/public/documents/${id}/attachments/${attachmentId}/download`);
+  },
   publicExportDocumentPdf(id: string) {
     return request<Blob>(`/public/documents/${id}/export/pdf`);
   },
@@ -180,6 +183,22 @@ export const api = {
   },
   getDocument(id: string, token: string) {
     return request<Record<string, unknown>>(`/admin/documents/${id}`, { token });
+  },
+  uploadDocumentAttachment(id: string, formData: FormData, token: string) {
+    return request<Record<string, unknown>>(`/admin/documents/${id}/attachments`, {
+      method: "POST",
+      token,
+      body: formData
+    });
+  },
+  deleteDocumentAttachment(id: string, attachmentId: string, token: string) {
+    return request<Record<string, unknown>>(`/admin/documents/${id}/attachments/${attachmentId}`, {
+      method: "DELETE",
+      token
+    });
+  },
+  downloadDocumentAttachment(id: string, attachmentId: string, token: string) {
+    return request<Blob>(`/admin/documents/${id}/attachments/${attachmentId}/download`, { token });
   },
   updateDocument(id: string, payload: Record<string, unknown>, token: string) {
     return request<Record<string, unknown>>(`/admin/documents/${id}`, {

@@ -28,4 +28,19 @@ export class PublicDocumentController {
     });
     return new StreamableFile(exported.buffer);
   }
+
+  @Public()
+  @Get(":id/attachments/:attachmentId/download")
+  async downloadAttachment(
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+    @Res({ passthrough: true }) res: any
+  ) {
+    const attachment = await this.documentService.getAttachmentFile(id, attachmentId);
+    res.set({
+      "Content-Type": attachment.mimeType || "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${encodeURIComponent(attachment.fileName)}"`
+    });
+    return new StreamableFile(attachment.buffer);
+  }
 }

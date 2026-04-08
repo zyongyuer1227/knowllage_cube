@@ -521,29 +521,29 @@ async function submitAction() {
   overflow: hidden;
   background: var(--app-bg);
   color: var(--text-primary);
-  --app-bg: #16181c;
-  --topbar-bg: #181a1d;
-  --border-color: #2a2d33;
-  --panel-bg: #202226;
-  --panel-muted-bg: #23262b;
-  --panel-header-bg: #1e2024;
-  --text-primary: #d7dae0;
-  --text-secondary: #b8c0cc;
-  --text-muted: #8f97a3;
-  --button-bg: #272b31;
-  --button-border: #343840;
-  --button-text: #d7dae0;
-  --input-bg: #17191c;
-  --input-border: #30343b;
-  --hover-bg: #2a2e35;
-  --active-bg: #313844;
-  --nav-active-bg: #2b2f36;
-  --nav-active-border: #3a4049;
-  --tab-bg: #2a2e35;
-  --accent-bg: #7c8cff;
-  --accent-text: #111318;
-  --file-icon-bg: #2f3440;
-  --file-icon-text: #9fb0ff;
+  --app-bg: #ffffff;
+  --topbar-bg: rgba(255, 255, 255, 0.92);
+  --border-color: #eeeeee;
+  --panel-bg: #ffffff;
+  --panel-muted-bg: #ffffff;
+  --panel-header-bg: #f4f4f4;
+  --text-primary: #171a20;
+  --text-secondary: #393c41;
+  --text-muted: #5c5e62;
+  --button-bg: #ffffff;
+  --button-border: #d0d1d2;
+  --button-text: #171a20;
+  --input-bg: #ffffff;
+  --input-border: #d0d1d2;
+  --hover-bg: #f4f4f4;
+  --active-bg: #eef3ff;
+  --nav-active-bg: #f4f4f4;
+  --nav-active-border: #eeeeee;
+  --tab-bg: #f4f4f4;
+  --accent-bg: #3e6ae1;
+  --accent-text: #ffffff;
+  --file-icon-bg: #f4f4f4;
+  --file-icon-text: #3e6ae1;
 }
 
 .app-content {
@@ -579,39 +579,67 @@ async function submitAction() {
 }
 
 .theme-light {
-  --app-bg: #f4f5f7;
-  --topbar-bg: #ffffff;
-  --border-color: #d9dde5;
-  --panel-bg: #eef1f5;
+  --app-bg: #ffffff;
+  --topbar-bg: rgba(255, 255, 255, 0.92);
+  --border-color: #eeeeee;
+  --panel-bg: #ffffff;
   --panel-muted-bg: #ffffff;
-  --panel-header-bg: #f7f9fc;
-  --text-primary: #1f2329;
-  --text-secondary: #3b4652;
-  --text-muted: #697586;
+  --panel-header-bg: #f4f4f4;
+  --text-primary: #171a20;
+  --text-secondary: #393c41;
+  --text-muted: #5c5e62;
   --button-bg: #ffffff;
-  --button-border: #cfd6df;
-  --button-text: #26313b;
+  --button-border: #d0d1d2;
+  --button-text: #171a20;
   --input-bg: #ffffff;
-  --input-border: #cfd6df;
-  --hover-bg: #e6ebf2;
-  --active-bg: #dbe6ff;
-  --nav-active-bg: #eceff3;
-  --nav-active-border: #d4dae2;
-  --tab-bg: #e8edf5;
-  --accent-bg: #5d78ff;
+  --input-border: #d0d1d2;
+  --hover-bg: #f4f4f4;
+  --active-bg: #eef3ff;
+  --nav-active-bg: #f4f4f4;
+  --nav-active-border: #eeeeee;
+  --tab-bg: #f4f4f4;
+  --accent-bg: #3e6ae1;
   --accent-text: #ffffff;
-  --file-icon-bg: #dfe6f6;
-  --file-icon-text: #3753da;
+  --file-icon-bg: #f4f4f4;
+  --file-icon-text: #3e6ae1;
+}
+
+.theme-dark {
+  --app-bg: #171a20;
+  --topbar-bg: rgba(23, 26, 32, 0.92);
+  --border-color: #2d3138;
+  --panel-bg: #171a20;
+  --panel-muted-bg: #1f2329;
+  --panel-header-bg: #1b2027;
+  --text-primary: #f5f5f5;
+  --text-secondary: #d0d1d2;
+  --text-muted: #8e8e8e;
+  --button-bg: #171a20;
+  --button-border: #393c41;
+  --button-text: #f5f5f5;
+  --input-bg: #171a20;
+  --input-border: #393c41;
+  --hover-bg: #1f2329;
+  --active-bg: #20304e;
+  --nav-active-bg: #1f2329;
+  --nav-active-border: #393c41;
+  --tab-bg: #1f2329;
+  --accent-bg: #3e6ae1;
+  --accent-text: #ffffff;
+  --file-icon-bg: #1f2329;
+  --file-icon-text: #8aa8ff;
 }
 
 .topbar {
-  height: 50px;
+  height: 56px;
   border-bottom: 1px solid var(--border-color);
   background: var(--topbar-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 24px;
   gap: 16px;
 }
 
@@ -624,11 +652,12 @@ async function submitAction() {
 
 .brand strong {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
 .brand span {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 
@@ -666,15 +695,17 @@ async function submitAction() {
 .topbar-btn {
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-muted);
-  border-radius: 6px;
-  padding: 4px 8px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  padding: 4px 16px;
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
+  transition: color 0.33s, background-color 0.33s, border-color 0.33s;
 }
 
 .topbar-btn:disabled {
@@ -700,20 +731,20 @@ async function submitAction() {
   border: 1px solid var(--input-border);
   background: var(--input-bg);
   color: var(--text-primary);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 8px;
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .document-dialog {
   width: min(1480px, calc(100vw - 48px));
   max-height: calc(100dvh - 96px);
   overflow: auto;
-  border: 1px solid color-mix(in srgb, var(--border-color) 76%, #ffffff 24%);
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--panel-bg) 97%, #ffffff 3%);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  box-shadow: none;
 }
 
 .document-form {
@@ -725,12 +756,12 @@ async function submitAction() {
 .document-form input,
 .document-form select {
   border: 1px solid var(--input-border);
-  background: color-mix(in srgb, var(--input-bg) 92%, #ffffff 8%);
+  background: var(--input-bg);
   color: var(--text-primary);
-  border-radius: 10px;
+  border-radius: 4px;
   padding: 10px 12px;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .document-form label {
@@ -749,9 +780,9 @@ async function submitAction() {
 .document-hero,
 .document-title-field,
 .document-card {
-  border: 1px solid color-mix(in srgb, var(--border-color) 72%, #ffffff 18%);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--panel-muted-bg) 92%, #ffffff 8%);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--panel-bg);
   box-shadow: none;
 }
 
@@ -771,10 +802,10 @@ async function submitAction() {
 .document-hero-icon {
   width: 56px;
   height: 56px;
-  border-radius: 14px;
+  border-radius: 4px;
   display: grid;
   place-items: center;
-  background: color-mix(in srgb, var(--panel-header-bg) 88%, #7b8799 12%);
+  background: var(--panel-header-bg);
   color: var(--text-secondary);
   font-size: 20px;
   flex: 0 0 auto;
@@ -824,16 +855,16 @@ async function submitAction() {
   gap: 8px;
   min-height: 34px;
   padding: 0 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-header-bg) 90%, #ffffff 10%);
-  border: 1px solid color-mix(in srgb, var(--border-color) 78%, #ffffff 12%);
+  border-radius: 4px;
+  background: var(--panel-header-bg);
+  border: 1px solid var(--border-color);
   color: var(--text-secondary);
   font-size: 12px;
 }
 
 .document-chip.subtle {
-  background: color-mix(in srgb, var(--panel-header-bg) 94%, #ffffff 6%);
-  border-color: color-mix(in srgb, var(--border-color) 88%, #ffffff 4%);
+  background: var(--panel-header-bg);
+  border-color: var(--border-color);
 }
 
 .document-title-field {
@@ -931,9 +962,9 @@ async function submitAction() {
 .icon-btn {
   width: 34px;
   height: 34px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 74%, #ffffff 18%);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--panel-header-bg) 88%, #ffffff 12%);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--panel-bg);
   color: var(--text-secondary);
   display: inline-grid;
   place-items: center;
@@ -957,25 +988,29 @@ async function submitAction() {
 .save-btn {
   min-height: 38px;
   padding: 0 14px;
-  border: 1px solid color-mix(in srgb, var(--border-color) 74%, #ffffff 18%);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--panel-header-bg) 88%, #ffffff 12%);
-  color: var(--text-primary);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--accent-bg);
+  color: var(--accent-text);
   font: inherit;
+  font-size: 14px;
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  transition: background-color 0.33s, color 0.33s, border-color 0.33s;
 }
 
 .save-btn.secondary-btn {
-  background: transparent;
-  color: var(--text-secondary);
+  background: var(--button-bg);
+  border-color: var(--button-border);
+  color: var(--button-text);
 }
 
 .save-btn:hover,
 .icon-btn:hover {
-  background: color-mix(in srgb, var(--hover-bg) 84%, #ffffff 16%);
+  background: var(--hover-bg);
 }
 
 .compact-btn {
@@ -987,7 +1022,7 @@ async function submitAction() {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 
@@ -1002,7 +1037,7 @@ a :deep(i),
   border: 1px solid var(--input-border);
   background: var(--input-bg);
   color: var(--text-primary);
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 8px;
   font: inherit;
 }
@@ -1015,15 +1050,16 @@ nav {
 a,
 .nav-link-btn {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 500;
   min-height: 32px;
-  padding: 4px 10px;
-  border-radius: 6px;
+  padding: 4px 16px;
+  border-radius: 4px;
   border: 1px solid transparent;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  transition: background-color 0.33s, border-color 0.33s, color 0.33s;
 }
 
 a {
@@ -1055,11 +1091,11 @@ a.router-link-active {
   min-height: 32px;
   padding: 6px 16px 8px;
   border-bottom: 1px solid var(--border-color);
-  background: var(--panel-header-bg);
+  background: var(--panel-bg);
   color: var(--text-secondary);
   display: grid;
   gap: 6px;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .action-banner.error {
@@ -1079,16 +1115,16 @@ a.router-link-active {
 
 .progress-track {
   width: 100%;
-  height: 5px;
+  height: 4px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--button-border) 55%, transparent);
+  background: var(--border-color);
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #5d78ff, #78b2ff);
+  background: var(--accent-bg);
   transition: width 240ms ease;
 }
 

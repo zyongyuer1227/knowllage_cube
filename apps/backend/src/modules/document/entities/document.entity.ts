@@ -1,5 +1,15 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from "typeorm";
 
+export type DocumentAttachment = {
+  id: string;
+  fileName: string;
+  displayName: string;
+  mimeType: string | null;
+  size: number;
+  relativePath: string;
+  uploadedAt: string;
+};
+
 @Entity({ name: "documents" })
 export class DocumentEntity {
   @PrimaryGeneratedColumn("increment", { type: "bigint" })
@@ -25,6 +35,9 @@ export class DocumentEntity {
 
   @Column({ type: "jsonb", name: "legal_path", nullable: true })
   legalPath!: string[] | null;
+
+  @Column({ type: "jsonb", name: "attachments", default: () => "'[]'::jsonb" })
+  attachments!: DocumentAttachment[];
 
   @Column({ type: "integer", name: "current_version", default: 1 })
   currentVersion!: number;

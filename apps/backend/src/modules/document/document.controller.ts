@@ -107,6 +107,47 @@ export class DocumentController {
     return new StreamableFile(exported.buffer);
   }
 
+  @Post(":id/attachments")
+  @UseInterceptors(FileInterceptor("file"))
+  async uploadAttachment(
+    @Param("id") id: string,
+    @UploadedFile()
+    file: { originalname: string; buffer?: Buffer; size?: number; path?: string; mimetype?: string } | undefined,
+    @Req() req: AuthRequest
+  ) {
+    if (!file) {
+      throw new BadRequestException("Missing file");
+    }
+    const byteLength = file.buffer?.byteLength ?? file.size ?? 0;
+    if (byteLength <= 0 && !file.path) {
+      throw new BadRequestException("Empty file");
+    }
+    return this.documentService.addAttachment(id, file, req.user?.sub);
+  }
+
+  @Delete(":id/attachments/:attachmentId")
+  deleteAttachment(
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+    @Req() req: AuthRequest
+  ) {
+    return this.documentService.deleteAttachment(id, attachmentId, req.user?.sub);
+  }
+
+  @Get(":id/attachments/:attachmentId/download")
+  async downloadAttachment(
+    @Param("id") id: string,
+    @Param("attachmentId") attachmentId: string,
+    @Res({ passthrough: true }) res: any
+  ) {
+    const attachment = await this.documentService.getAttachmentFile(id, attachmentId);
+    res.set({
+      "Content-Type": attachment.mimeType || "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${encodeURIComponent(attachment.fileName)}"`
+    });
+    return new StreamableFile(attachment.buffer);
+  }
+
   @Put(":id")
   updateDocument(@Param("id") id: string, @Body() body: UpdateDocumentDto, @Req() req: AuthRequest) {
     return this.documentService.updateDocument(id, body, req.user?.sub);
@@ -166,10 +207,38 @@ export class DocumentController {
   }
 
   private normalizeArrayValue(value: unknown) {
+    const parseJsonArray = (input: unknown) => {
+      if (typeof input !== "string") {
+        return null;
+      }
+      const trimmed = input.trim();
+      if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed)
+          ? parsed.map((item) => String(item ?? "").trim()).filter(Boolean)
+          : null;
+      } catch {
+        return null;
+      }
+    };
+
     if (Array.isArray(value)) {
+      if (value.length === 1) {
+        const parsed = parseJsonArray(value[0]);
+        if (parsed) {
+          return parsed;
+        }
+      }
       return value
         .map((item) => String(item ?? "").trim())
         .filter(Boolean);
+    }
+    const parsed = parseJsonArray(value);
+    if (parsed) {
+      return parsed;
     }
     if (typeof value === "string" && value.trim()) {
       return [value.trim()];

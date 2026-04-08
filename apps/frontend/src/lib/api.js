@@ -51,6 +51,9 @@ export const api = {
     publicDocument(id) {
         return request(`/public/documents/${id}`);
     },
+    publicDownloadAttachment(id, attachmentId) {
+        return request(`/public/documents/${id}/attachments/${attachmentId}/download`);
+    },
     publicExportDocumentPdf(id) {
         return request(`/public/documents/${id}/export/pdf`);
     },
@@ -123,6 +126,22 @@ export const api = {
     },
     getDocument(id, token) {
         return request(`/admin/documents/${id}`, { token });
+    },
+    uploadDocumentAttachment(id, formData, token) {
+        return request(`/admin/documents/${id}/attachments`, {
+            method: "POST",
+            token,
+            body: formData
+        });
+    },
+    deleteDocumentAttachment(id, attachmentId, token) {
+        return request(`/admin/documents/${id}/attachments/${attachmentId}`, {
+            method: "DELETE",
+            token
+        });
+    },
+    downloadDocumentAttachment(id, attachmentId, token) {
+        return request(`/admin/documents/${id}/attachments/${attachmentId}/download`, { token });
     },
     updateDocument(id, payload, token) {
         return request(`/admin/documents/${id}`, {

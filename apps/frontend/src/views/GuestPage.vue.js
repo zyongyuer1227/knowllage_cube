@@ -1,4 +1,4 @@
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
 import GuestDocPreview from "../components/GuestDocPreview.vue";
 import { api } from "../lib/api";
@@ -6,29 +6,26 @@ import { useWorkspaceStore } from "../stores/workspace";
 const workspace = useWorkspaceStore();
 const search = ref("");
 const sidebarCollapsed = ref(false);
+const resultsCollapsed = ref(false);
 const exportBusy = ref(false);
 const exportError = ref("");
+const searchBusy = ref(false);
+const searchError = ref("");
+const previewFrame = ref(null);
 const activeBusinessPath = ref([]);
 const activeLegalLevel = ref("");
 const expandedBusinessKeys = ref([]);
+let searchTimer = 0;
+let activeSearchToken = 0;
 const legalTabs = computed(() => workspace.documentTaxonomy.legalLevels.map((item) => item.name));
 const businessRoots = computed(() => workspace.documentTaxonomy.businessDomains);
 const documentTotal = computed(() => workspace.docs.length);
-function docMatchesKeyword(doc) {
-    const keyword = search.value.trim().toLowerCase();
-    return (!keyword ||
-        doc.title.toLowerCase().includes(keyword) ||
-        doc.businessPath.join("/").toLowerCase().includes(keyword) ||
-        doc.legalPath.join("/").toLowerCase().includes(keyword) ||
-        doc.archivePath.toLowerCase().includes(keyword));
-}
 const filteredDocs = computed(() => {
     return workspace.docs.filter((doc) => {
         const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
         const matchesBusiness = activeBusinessPath.value.length === 0 ||
             activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-        const matchesKeyword = docMatchesKeyword(doc);
-        return matchesLegal && matchesBusiness && matchesKeyword;
+        return matchesLegal && matchesBusiness;
     });
 });
 const activeFilteredDocument = computed(() => {
@@ -41,8 +38,8 @@ const activeFilteredDocument = computed(() => {
         return filteredDocs.value[0] ?? null;
     }
     return {
-        ...matched,
-        ...doc
+        ...doc,
+        searchSnippet: matched.searchSnippet
     };
 });
 const activeBusinessSummary = computed(() => activeBusinessPath.value.join(" / ") || "全部业务领域");
@@ -58,6 +55,7 @@ const activeResultMeta = computed(() => {
         doc.updatedAt ? `更新于 ${formatDate(doc.updatedAt)}` : ""
     ].filter(Boolean);
 });
+const activeAttachments = computed(() => activeFilteredDocument.value?.attachments ?? []);
 function makeBusinessKey(path) {
     return path.join("/");
 }
@@ -65,7 +63,7 @@ function countDocsForBusiness(path) {
     return workspace.docs.filter((doc) => {
         const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
         const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-        return matchesPath && matchesLegal && docMatchesKeyword(doc);
+        return matchesPath && matchesLegal;
     }).length;
 }
 function countDocsForLegal(level) {
@@ -73,20 +71,20 @@ function countDocsForLegal(level) {
         const matchesLegal = doc.legalPath[0] === level;
         const matchesBusiness = activeBusinessPath.value.length === 0 ||
             activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-        return matchesLegal && matchesBusiness && docMatchesKeyword(doc);
+        return matchesLegal && matchesBusiness;
     }).length;
 }
 function countDocsForAllLegal() {
     return workspace.docs.filter((doc) => {
         const matchesBusiness = activeBusinessPath.value.length === 0 ||
             activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
-        return matchesBusiness && docMatchesKeyword(doc);
+        return matchesBusiness;
     }).length;
 }
 function countDocsForAllBusiness() {
     return workspace.docs.filter((doc) => {
         const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-        return matchesLegal && docMatchesKeyword(doc);
+        return matchesLegal;
     }).length;
 }
 function isBusinessPathActive(path) {
@@ -118,6 +116,9 @@ function clearBusinessPath() {
 function setLegalLevel(level) {
     activeLegalLevel.value = level;
 }
+function clearSearch() {
+    search.value = "";
+}
 function formatDate(value) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) {
@@ -132,6 +133,24 @@ function formatDate(value) {
 function summarizePath(path) {
     return path.join(" / ") || "未设置";
 }
+function escapeHtml(value) {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+function renderHighlightedSnippet(value) {
+    const snippet = value ?? "";
+    const keyword = search.value.trim();
+    const escapedSnippet = escapeHtml(snippet);
+    if (!keyword) {
+        return escapedSnippet;
+    }
+    const escapedKeyword = escapeHtml(keyword).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return escapedSnippet.replace(new RegExp(escapedKeyword, "gi"), (match) => `<mark class="result-hit">${match}</mark>`);
+}
 async function selectDocument(doc) {
     workspace.setActive(doc.id);
     try {
@@ -139,6 +158,24 @@ async function selectDocument(doc) {
     }
     catch (error) {
         exportError.value = error instanceof Error ? error.message : "加载文档失败";
+    }
+}
+async function triggerSearch(query) {
+    const ticket = ++activeSearchToken;
+    searchBusy.value = true;
+    searchError.value = "";
+    try {
+        await workspace.searchPublicDocuments(query);
+    }
+    catch (error) {
+        if (ticket === activeSearchToken) {
+            searchError.value = error instanceof Error ? error.message : "检索失败";
+        }
+    }
+    finally {
+        if (ticket === activeSearchToken) {
+            searchBusy.value = false;
+        }
     }
 }
 watch(businessRoots, (nodes) => {
@@ -155,6 +192,12 @@ watch(businessRoots, (nodes) => {
     walk(nodes);
     expandedBusinessKeys.value = Array.from(new Set([...expandedBusinessKeys.value, ...nextKeys]));
 }, { immediate: true });
+watch(search, (value) => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+        void triggerSearch(value);
+    }, value.trim() ? 260 : 0);
+});
 watch(filteredDocs, (docs) => {
     const current = workspace.activeDocument;
     if (docs.length === 0) {
@@ -167,6 +210,9 @@ watch(filteredDocs, (docs) => {
 onMounted(async () => {
     workspace.ensureInitialized();
     await workspace.loadPublicWorkspace();
+});
+onBeforeUnmount(() => {
+    window.clearTimeout(searchTimer);
 });
 async function exportCurrentDocument() {
     const doc = activeFilteredDocument.value;
@@ -197,22 +243,64 @@ function businessNodeHasMatches(path) {
     return workspace.docs.some((doc) => {
         const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
         const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
-        return matchesPath && matchesLegal && docMatchesKeyword(doc);
+        return matchesPath && matchesLegal;
     });
 }
 function isDocumentActive(doc) {
     return activeFilteredDocument.value?.id === doc.id;
+}
+function jumpToNextMatch() {
+    previewFrame.value?.findNextMatch();
+}
+function jumpToPrevMatch() {
+    previewFrame.value?.findPrevMatch();
+}
+function formatFileSize(size) {
+    if (size >= 1024 * 1024) {
+        return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+    if (size >= 1024) {
+        return `${Math.round(size / 1024)} KB`;
+    }
+    return `${size} B`;
+}
+async function downloadAttachment(attachment) {
+    const doc = activeFilteredDocument.value;
+    if (!doc || !/^\d+$/.test(doc.id)) {
+        return;
+    }
+    try {
+        const blob = await api.publicDownloadAttachment(doc.id, attachment.id);
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = attachment.displayName || attachment.fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+    }
+    catch (error) {
+        exportError.value = error instanceof Error ? error.message : "附件下载失败";
+    }
 }
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['filter-bar']} */ ;
 /** @type {__VLS_StyleScopedClasses['filter-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['filter-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['hero-search']} */ ;
 /** @type {__VLS_StyleScopedClasses['hero-search']} */ ;
+/** @type {__VLS_StyleScopedClasses['search-clear-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['hero-action']} */ ;
 /** @type {__VLS_StyleScopedClasses['legal-nav']} */ ;
 /** @type {__VLS_StyleScopedClasses['legal-pill']} */ ;
@@ -260,12 +348,18 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['result-copy']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-copy']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['result-snippet']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-meta']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-body']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['business-panel-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-panel-collapsed']} */ ;
 /** @type {__VLS_StyleScopedClasses['collapsed-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-collapsed']} */ ;
 /** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
@@ -277,14 +371,22 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
 /** @type {__VLS_StyleScopedClasses['collapsed']} */ ;
 /** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
+/** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
+/** @type {__VLS_StyleScopedClasses['collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['content-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['business-panel-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-panel-collapsed']} */ ;
 /** @type {__VLS_StyleScopedClasses['results-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-panel']} */ ;
 // CSS variable injection 
 // CSS variable injection end 
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
     ...{ class: "guest-shell" },
-    ...{ class: ({ collapsed: __VLS_ctx.sidebarCollapsed }) },
+    ...{ class: ({ collapsed: __VLS_ctx.sidebarCollapsed, 'results-collapsed': __VLS_ctx.resultsCollapsed }) },
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
     ...{ class: "filter-bar" },
@@ -325,8 +427,26 @@ const __VLS_4 = __VLS_3({
 __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
     value: (__VLS_ctx.search),
     type: "text",
-    placeholder: "搜索标题、业务领域、效力层级...",
+    placeholder: "搜索标题、业务领域、效力层级、正文内容...",
 });
+if (__VLS_ctx.search.trim()) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.clearSearch) },
+        type: "button",
+        ...{ class: "search-clear-btn" },
+        'aria-label': "清空搜索",
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_6 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "xmark",
+        fixedWidth: true,
+    }));
+    const __VLS_7 = __VLS_6({
+        name: "xmark",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_6));
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.nav, __VLS_intrinsicElements.nav)({
     ...{ class: "legal-nav" },
     'aria-label': "效力层级筛选",
@@ -366,14 +486,14 @@ if (__VLS_ctx.activeFilteredDocument) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_6 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_9 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "file-arrow-down",
         fixedWidth: true,
     }));
-    const __VLS_7 = __VLS_6({
+    const __VLS_10 = __VLS_9({
         name: "file-arrow-down",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_6));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_9));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     (__VLS_ctx.exportBusy ? "导出中..." : "导出文档");
 }
@@ -397,14 +517,14 @@ if (!__VLS_ctx.sidebarCollapsed) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_9 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_12 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "folder-tree",
         fixedWidth: true,
     }));
-    const __VLS_10 = __VLS_9({
+    const __VLS_13 = __VLS_12({
         name: "folder-tree",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_9));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_12));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (...[$event]) => {
@@ -418,14 +538,14 @@ if (!__VLS_ctx.sidebarCollapsed) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_12 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_15 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "angles-left",
         fixedWidth: true,
     }));
-    const __VLS_13 = __VLS_12({
+    const __VLS_16 = __VLS_15({
         name: "angles-left",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_12));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_15));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.clearBusinessPath) },
         type: "button",
@@ -437,14 +557,14 @@ if (!__VLS_ctx.sidebarCollapsed) {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_15 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_18 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "layer-group",
         fixedWidth: true,
     }));
-    const __VLS_16 = __VLS_15({
+    const __VLS_19 = __VLS_18({
         name: "layer-group",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_15));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_18));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
     (__VLS_ctx.countDocsForAllBusiness());
@@ -473,14 +593,14 @@ if (!__VLS_ctx.sidebarCollapsed) {
             });
             /** @type {[typeof FaIcon, ]} */ ;
             // @ts-ignore
-            const __VLS_18 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            const __VLS_21 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
                 name: (__VLS_ctx.isBusinessExpanded([node.name]) ? 'minus' : 'plus'),
                 fixedWidth: true,
             }));
-            const __VLS_19 = __VLS_18({
+            const __VLS_22 = __VLS_21({
                 name: (__VLS_ctx.isBusinessExpanded([node.name]) ? 'minus' : 'plus'),
                 fixedWidth: true,
-            }, ...__VLS_functionalComponentArgsRest(__VLS_18));
+            }, ...__VLS_functionalComponentArgsRest(__VLS_21));
         }
         else {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -529,14 +649,14 @@ if (!__VLS_ctx.sidebarCollapsed) {
                     });
                     /** @type {[typeof FaIcon, ]} */ ;
                     // @ts-ignore
-                    const __VLS_21 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+                    const __VLS_24 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
                         name: (__VLS_ctx.isBusinessExpanded([node.name, child.name]) ? 'minus' : 'plus'),
                         fixedWidth: true,
                     }));
-                    const __VLS_22 = __VLS_21({
+                    const __VLS_25 = __VLS_24({
                         name: (__VLS_ctx.isBusinessExpanded([node.name, child.name]) ? 'minus' : 'plus'),
                         fixedWidth: true,
-                    }, ...__VLS_functionalComponentArgsRest(__VLS_21));
+                    }, ...__VLS_functionalComponentArgsRest(__VLS_24));
                 }
                 else {
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
@@ -606,130 +726,199 @@ else {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_24 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_27 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "angles-right",
         fixedWidth: true,
     }));
-    const __VLS_25 = __VLS_24({
+    const __VLS_28 = __VLS_27({
         name: "angles-right",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_24));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_27));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 }
-__VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-    ...{ class: "results-panel" },
-});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-    ...{ class: "panel-card results-card" },
-});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-    ...{ class: "panel-header" },
-});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
-    ...{ class: "panel-eyebrow" },
-});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-/** @type {[typeof FaIcon, ]} */ ;
-// @ts-ignore
-const __VLS_27 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
-    name: "list-ul",
-    fixedWidth: true,
-}));
-const __VLS_28 = __VLS_27({
-    name: "list-ul",
-    fixedWidth: true,
-}, ...__VLS_functionalComponentArgsRest(__VLS_27));
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-(__VLS_ctx.activeLegalSummary);
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-    ...{ class: "result-badge" },
-});
-(__VLS_ctx.filteredDocs.length);
-__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-    ...{ class: "filter-summary" },
-});
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-    ...{ class: "summary-chip" },
-});
-/** @type {[typeof FaIcon, ]} */ ;
-// @ts-ignore
-const __VLS_30 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
-    name: "scale-balanced",
-    fixedWidth: true,
-}));
-const __VLS_31 = __VLS_30({
-    name: "scale-balanced",
-    fixedWidth: true,
-}, ...__VLS_functionalComponentArgsRest(__VLS_30));
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-(__VLS_ctx.activeLegalSummary);
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-    ...{ class: "summary-chip" },
-});
-/** @type {[typeof FaIcon, ]} */ ;
-// @ts-ignore
-const __VLS_33 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
-    name: "folder-tree",
-    fixedWidth: true,
-}));
-const __VLS_34 = __VLS_33({
-    name: "folder-tree",
-    fixedWidth: true,
-}, ...__VLS_functionalComponentArgsRest(__VLS_33));
-__VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-(__VLS_ctx.activeBusinessSummary);
-__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-    ...{ class: "results-list" },
-});
-for (const [doc] of __VLS_getVForSourceType((__VLS_ctx.filteredDocs))) {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (...[$event]) => {
-                __VLS_ctx.selectDocument(doc);
-            } },
-        key: (doc.id),
-        type: "button",
-        ...{ class: "result-item" },
-        ...{ class: ({ active: __VLS_ctx.isDocumentActive(doc) }) },
+if (!__VLS_ctx.resultsCollapsed) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "results-panel" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "result-icon" },
+        ...{ class: "panel-card results-card" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "panel-header" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "panel-eyebrow" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_30 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "list-ul",
+        fixedWidth: true,
+    }));
+    const __VLS_31 = __VLS_30({
+        name: "list-ul",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_30));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.activeLegalSummary);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "panel-header-actions" },
+    });
+    if (__VLS_ctx.searchBusy) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "result-badge" },
+        });
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "result-badge" },
+    });
+    (__VLS_ctx.filteredDocs.length);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(!__VLS_ctx.resultsCollapsed))
+                    return;
+                __VLS_ctx.resultsCollapsed = true;
+            } },
+        type: "button",
+        ...{ class: "icon-btn" },
+        'aria-label': "收起结果列表",
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_33 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "angles-left",
+        fixedWidth: true,
+    }));
+    const __VLS_34 = __VLS_33({
+        name: "angles-left",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_33));
+    if (__VLS_ctx.searchError) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+            ...{ class: "error-banner" },
+        });
+        (__VLS_ctx.searchError);
+    }
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "filter-summary" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "summary-chip" },
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
     const __VLS_36 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
-        name: "file-lines",
+        name: "scale-balanced",
         fixedWidth: true,
     }));
     const __VLS_37 = __VLS_36({
-        name: "file-lines",
+        name: "scale-balanced",
         fixedWidth: true,
     }, ...__VLS_functionalComponentArgsRest(__VLS_36));
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "result-copy" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-    (doc.title);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.summarizePath(doc.legalPath));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    (__VLS_ctx.summarizePath(doc.businessPath));
-}
-if (__VLS_ctx.filteredDocs.length === 0) {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "empty-state" },
+    (__VLS_ctx.activeLegalSummary);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "summary-chip" },
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
     const __VLS_39 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
-        name: "inbox",
+        name: "folder-tree",
         fixedWidth: true,
     }));
     const __VLS_40 = __VLS_39({
-        name: "inbox",
+        name: "folder-tree",
         fixedWidth: true,
     }, ...__VLS_functionalComponentArgsRest(__VLS_39));
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    (__VLS_ctx.activeBusinessSummary);
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "results-list" },
+    });
+    for (const [doc] of __VLS_getVForSourceType((__VLS_ctx.filteredDocs))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(!__VLS_ctx.resultsCollapsed))
+                        return;
+                    __VLS_ctx.selectDocument(doc);
+                } },
+            key: (doc.id),
+            type: "button",
+            ...{ class: "result-item" },
+            ...{ class: ({ active: __VLS_ctx.isDocumentActive(doc) }) },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "result-icon" },
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_42 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "file-lines",
+            fixedWidth: true,
+        }));
+        const __VLS_43 = __VLS_42({
+            name: "file-lines",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_42));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "result-copy" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        (doc.title);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        (__VLS_ctx.summarizePath(doc.legalPath));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        (__VLS_ctx.summarizePath(doc.businessPath));
+        if (doc.searchSnippet) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({
+                ...{ class: "result-snippet" },
+            });
+            __VLS_asFunctionalDirective(__VLS_directives.vHtml)(null, { ...__VLS_directiveBindingRestFields, value: (__VLS_ctx.renderHighlightedSnippet(doc.searchSnippet)) }, null, null);
+        }
+    }
+    if (__VLS_ctx.filteredDocs.length === 0) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "empty-state" },
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_45 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "inbox",
+            fixedWidth: true,
+        }));
+        const __VLS_46 = __VLS_45({
+            name: "inbox",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_45));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    }
+}
+else {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.aside, __VLS_intrinsicElements.aside)({
+        ...{ class: "results-panel-collapsed" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!!(!__VLS_ctx.resultsCollapsed))
+                    return;
+                __VLS_ctx.resultsCollapsed = false;
+            } },
+        type: "button",
+        ...{ class: "collapsed-btn" },
+    });
+    /** @type {[typeof FaIcon, ]} */ ;
+    // @ts-ignore
+    const __VLS_48 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        name: "angles-right",
+        fixedWidth: true,
+    }));
+    const __VLS_49 = __VLS_48({
+        name: "angles-right",
+        fixedWidth: true,
+    }, ...__VLS_functionalComponentArgsRest(__VLS_48));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 }
 __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -748,16 +937,34 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)(
 __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
 /** @type {[typeof FaIcon, ]} */ ;
 // @ts-ignore
-const __VLS_42 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
     name: "file-lines",
     fixedWidth: true,
 }));
-const __VLS_43 = __VLS_42({
+const __VLS_52 = __VLS_51({
     name: "file-lines",
     fixedWidth: true,
-}, ...__VLS_functionalComponentArgsRest(__VLS_42));
+}, ...__VLS_functionalComponentArgsRest(__VLS_51));
 __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 (__VLS_ctx.activeFilteredDocument?.title || "未选择文档");
+__VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+    ...{ class: "preview-side-meta" },
+});
+if (__VLS_ctx.search.trim()) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "match-nav" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.jumpToPrevMatch) },
+        type: "button",
+        ...{ class: "mini-nav-btn" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.jumpToNextMatch) },
+        type: "button",
+        ...{ class: "mini-nav-btn" },
+    });
+}
 __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
     ...{ class: "preview-meta" },
 });
@@ -783,28 +990,72 @@ if (__VLS_ctx.activeFilteredDocument) {
         });
         /** @type {[typeof FaIcon, ]} */ ;
         // @ts-ignore
-        const __VLS_45 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+        const __VLS_54 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
             name: "spinner",
             fixedWidth: true,
             ...{ class: "spin" },
         }));
-        const __VLS_46 = __VLS_45({
+        const __VLS_55 = __VLS_54({
             name: "spinner",
             fixedWidth: true,
             ...{ class: "spin" },
-        }, ...__VLS_functionalComponentArgsRest(__VLS_45));
+        }, ...__VLS_functionalComponentArgsRest(__VLS_54));
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
     }
     /** @type {[typeof GuestDocPreview, ]} */ ;
     // @ts-ignore
-    const __VLS_48 = __VLS_asFunctionalComponent(GuestDocPreview, new GuestDocPreview({
+    const __VLS_57 = __VLS_asFunctionalComponent(GuestDocPreview, new GuestDocPreview({
+        ref: "previewFrame",
         source: (__VLS_ctx.activeFilteredDocument.markdownSource ?? ''),
         persistedHtml: (__VLS_ctx.activeFilteredDocument.previewHtml),
+        highlightTerm: (__VLS_ctx.search.trim()),
     }));
-    const __VLS_49 = __VLS_48({
+    const __VLS_58 = __VLS_57({
+        ref: "previewFrame",
         source: (__VLS_ctx.activeFilteredDocument.markdownSource ?? ''),
         persistedHtml: (__VLS_ctx.activeFilteredDocument.previewHtml),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_48));
+        highlightTerm: (__VLS_ctx.search.trim()),
+    }, ...__VLS_functionalComponentArgsRest(__VLS_57));
+    /** @type {typeof __VLS_ctx.previewFrame} */ ;
+    var __VLS_60 = {};
+    var __VLS_59;
+    if (__VLS_ctx.activeAttachments.length > 0) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "attachment-strip attachment-footer" },
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+            ...{ class: "attachment-footer-title" },
+        });
+        /** @type {[typeof FaIcon, ]} */ ;
+        // @ts-ignore
+        const __VLS_62 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+            name: "paperclip",
+            fixedWidth: true,
+        }));
+        const __VLS_63 = __VLS_62({
+            name: "paperclip",
+            fixedWidth: true,
+        }, ...__VLS_functionalComponentArgsRest(__VLS_62));
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+        for (const [attachment] of __VLS_getVForSourceType((__VLS_ctx.activeAttachments))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                ...{ onClick: (...[$event]) => {
+                        if (!(__VLS_ctx.activeFilteredDocument))
+                            return;
+                        if (!(__VLS_ctx.activeAttachments.length > 0))
+                            return;
+                        __VLS_ctx.downloadAttachment(attachment);
+                    } },
+                key: (attachment.id),
+                type: "button",
+                ...{ class: "attachment-chip" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (attachment.displayName);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+            (__VLS_ctx.formatFileSize(attachment.size));
+        }
+    }
 }
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
@@ -812,14 +1063,14 @@ else {
     });
     /** @type {[typeof FaIcon, ]} */ ;
     // @ts-ignore
-    const __VLS_51 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
+    const __VLS_65 = __VLS_asFunctionalComponent(FaIcon, new FaIcon({
         name: "file-circle-xmark",
         fixedWidth: true,
     }));
-    const __VLS_52 = __VLS_51({
+    const __VLS_66 = __VLS_65({
         name: "file-circle-xmark",
         fixedWidth: true,
-    }, ...__VLS_functionalComponentArgsRest(__VLS_51));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_65));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 }
 /** @type {__VLS_StyleScopedClasses['guest-shell']} */ ;
@@ -828,6 +1079,7 @@ else {
 /** @type {__VLS_StyleScopedClasses['filter-title']} */ ;
 /** @type {__VLS_StyleScopedClasses['hero-search']} */ ;
 /** @type {__VLS_StyleScopedClasses['compact-search']} */ ;
+/** @type {__VLS_StyleScopedClasses['search-clear-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['legal-nav']} */ ;
 /** @type {__VLS_StyleScopedClasses['legal-pill']} */ ;
 /** @type {__VLS_StyleScopedClasses['legal-pill']} */ ;
@@ -865,7 +1117,11 @@ else {
 /** @type {__VLS_StyleScopedClasses['results-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-header-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-badge']} */ ;
+/** @type {__VLS_StyleScopedClasses['result-badge']} */ ;
+/** @type {__VLS_StyleScopedClasses['icon-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['error-banner']} */ ;
 /** @type {__VLS_StyleScopedClasses['filter-summary']} */ ;
 /** @type {__VLS_StyleScopedClasses['summary-chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['summary-chip']} */ ;
@@ -873,19 +1129,32 @@ else {
 /** @type {__VLS_StyleScopedClasses['result-item']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['result-copy']} */ ;
+/** @type {__VLS_StyleScopedClasses['result-snippet']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-state']} */ ;
+/** @type {__VLS_StyleScopedClasses['results-panel-collapsed']} */ ;
+/** @type {__VLS_StyleScopedClasses['collapsed-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-card']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-eyebrow']} */ ;
+/** @type {__VLS_StyleScopedClasses['preview-side-meta']} */ ;
+/** @type {__VLS_StyleScopedClasses['match-nav']} */ ;
+/** @type {__VLS_StyleScopedClasses['mini-nav-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['mini-nav-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-meta']} */ ;
 /** @type {__VLS_StyleScopedClasses['error-banner']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-body']} */ ;
 /** @type {__VLS_StyleScopedClasses['preview-loading']} */ ;
 /** @type {__VLS_StyleScopedClasses['spin']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-strip']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-footer']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-footer-title']} */ ;
+/** @type {__VLS_StyleScopedClasses['attachment-chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-preview']} */ ;
+// @ts-ignore
+var __VLS_61 = __VLS_60;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
@@ -895,8 +1164,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             workspace: workspace,
             search: search,
             sidebarCollapsed: sidebarCollapsed,
+            resultsCollapsed: resultsCollapsed,
             exportBusy: exportBusy,
             exportError: exportError,
+            searchBusy: searchBusy,
+            searchError: searchError,
+            previewFrame: previewFrame,
             activeBusinessPath: activeBusinessPath,
             activeLegalLevel: activeLegalLevel,
             legalTabs: legalTabs,
@@ -907,6 +1180,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             activeBusinessSummary: activeBusinessSummary,
             activeLegalSummary: activeLegalSummary,
             activeResultMeta: activeResultMeta,
+            activeAttachments: activeAttachments,
             countDocsForBusiness: countDocsForBusiness,
             countDocsForLegal: countDocsForLegal,
             countDocsForAllLegal: countDocsForAllLegal,
@@ -917,11 +1191,17 @@ const __VLS_self = (await import('vue')).defineComponent({
             selectBusinessPath: selectBusinessPath,
             clearBusinessPath: clearBusinessPath,
             setLegalLevel: setLegalLevel,
+            clearSearch: clearSearch,
             summarizePath: summarizePath,
+            renderHighlightedSnippet: renderHighlightedSnippet,
             selectDocument: selectDocument,
             exportCurrentDocument: exportCurrentDocument,
             businessNodeHasMatches: businessNodeHasMatches,
             isDocumentActive: isDocumentActive,
+            jumpToNextMatch: jumpToNextMatch,
+            jumpToPrevMatch: jumpToPrevMatch,
+            formatFileSize: formatFileSize,
+            downloadAttachment: downloadAttachment,
         };
     },
 });

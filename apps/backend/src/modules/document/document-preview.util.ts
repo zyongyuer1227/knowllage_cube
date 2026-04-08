@@ -116,7 +116,9 @@ export async function renderPersistedPreviewHtml(
     timestamp: new Date().toISOString(),
     ...context
   });
-  const rendered = normalizePreviewMarkup(normalizeImageMarkup(marked.parse(preprocessMarkdownSource(source ?? "")) as string));
+  const rendered = normalizePreviewMarkup(
+    normalizeImageMarkup(marked.parse(preprocessMarkdownSource(source ?? "")) as string)
+  );
 
   return `<!doctype html>
 <html lang="zh-CN">

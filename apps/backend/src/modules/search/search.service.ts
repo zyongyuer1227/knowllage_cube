@@ -78,14 +78,21 @@ export class SearchService {
     }
 
     qb.skip((query.page - 1) * query.pageSize).take(query.pageSize);
-    const rows = await qb.getMany();
+    qb.addSelect("COALESCE(dc.raw_text, '')", "search_raw_text");
+    qb.addSelect("COALESCE(dc.markdown_content, '')", "search_markdown_content");
+    const { entities, raw } = await qb.getRawAndEntities();
 
     const response = {
       query: keyword,
       page: query.page,
       pageSize: query.pageSize,
       total,
-      items: rows.map((row) => ({
+      items: entities.map((row, index) => ({
+        ...this.buildSearchMatch(
+          keyword,
+          String(raw[index]?.search_raw_text ?? ""),
+          String(raw[index]?.search_markdown_content ?? "")
+        ),
         id: row.id,
         title: row.title,
         archivePath: row.archivePath,
@@ -121,6 +128,16 @@ export class SearchService {
       businessPath: document.businessPath,
       legalLevel: document.legalLevel,
       legalPath: document.legalPath,
+      attachments: Array.isArray(document.attachments)
+        ? document.attachments.map((attachment) => ({
+            id: attachment.id,
+            fileName: attachment.fileName,
+            displayName: attachment.displayName,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+            uploadedAt: attachment.uploadedAt
+          }))
+        : [],
       markdownContent: content.markdownContent,
       rawText: await this.readTextFile(join(this.documentsRoot, id, "content.txt")),
       previewHtml: await renderPersistedPreviewHtml(
@@ -208,6 +225,50 @@ export class SearchService {
     } catch {
       return null;
     }
+  }
+
+  private buildSearchMatch(keyword: string, rawText: string, markdownContent: string) {
+    const normalizedKeyword = keyword.trim().toLowerCase();
+    if (!normalizedKeyword) {
+      return {
+        searchSnippet: null
+      };
+    }
+
+    const content = this.normalizeSearchText(rawText || markdownContent);
+    if (!content) {
+      return {
+        searchSnippet: null
+      };
+    }
+
+    const lowerContent = content.toLowerCase();
+    const matchIndex = lowerContent.indexOf(normalizedKeyword);
+    if (matchIndex < 0) {
+      return {
+        searchSnippet: null
+      };
+    }
+
+    const contextRadius = 42;
+    const start = Math.max(0, matchIndex - contextRadius);
+    const end = Math.min(content.length, matchIndex + normalizedKeyword.length + contextRadius);
+    const prefix = start > 0 ? "..." : "";
+    const suffix = end < content.length ? "..." : "";
+    return {
+      searchSnippet: `${prefix}${content.slice(start, end).trim()}${suffix}`
+    };
+  }
+
+  private normalizeSearchText(value: string) {
+    return value
+      .replace(/\r/g, " ")
+      .replace(/\n+/g, " ")
+      .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+      .replace(/\[[^\]]+\]\([^)]+\)/g, " ")
+      .replace(/[`#>*_~\-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private buildWatermarkContext(
