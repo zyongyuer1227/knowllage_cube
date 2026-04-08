@@ -62,6 +62,10 @@ export class SystemService {
     };
   }
 
+  async getPublicDocumentTaxonomy() {
+    return this.readDocumentTaxonomy();
+  }
+
   async getAdminWelcomeDocument(req?: AuthRequest) {
     return this.readWelcomeDocument(this.buildWatermarkContext("admin", req, "screen"));
   }

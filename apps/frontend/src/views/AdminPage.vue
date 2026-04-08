@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FaIcon from "../components/FaIcon.vue";
-import GovDocPreview from "../components/GovDocPreview.vue";
-import WorkspaceTree from "../components/WorkspaceTree.vue";
+import AdminDocPreview from "../components/AdminDocPreview.vue";
 import { useAppSettings } from "../lib/app-settings";
 import { api, type PreviewWatermarkSettings } from "../lib/api";
 import { buildTaxonomyPaths } from "../lib/document-taxonomy";
 import { useAuthStore } from "../stores/auth";
-import { useWorkspaceStore, type WorkspaceDoc, type WorkspaceTreeNode } from "../stores/workspace";
+import { useWorkspaceStore, type WorkspaceDoc } from "../stores/workspace";
 
 const auth = useAuthStore();
 const workspace = useWorkspaceStore();
@@ -16,7 +15,6 @@ const { branding, defaultBranding, resetBranding, setBranding } = useAppSettings
 const search = ref("");
 const loginError = ref("");
 const statusMessage = ref("");
-const openFolders = ref<string[]>([]);
 const selectedDocumentIds = ref<string[]>([]);
 const showSettings = ref(false);
 const settingsBusy = ref(false);
@@ -24,13 +22,15 @@ const formatBusy = ref(false);
 const formatProgress = ref(0);
 const formatStageLabel = ref("");
 const markdownTextarea = ref<HTMLTextAreaElement | null>(null);
-const previewFrame = ref<InstanceType<typeof GovDocPreview> | null>(null);
+const previewFrame = ref<InstanceType<typeof AdminDocPreview> | null>(null);
 const syncSource = ref<"editor" | "preview" | null>(null);
 const showAttributes = ref(false);
 const showTaxonomySettings = ref(false);
 const taxonomyBusy = ref(false);
 const taxonomyBusinessPathsText = ref("");
 const taxonomyLegalPathsText = ref("");
+const activeBusinessPath = ref<string[]>([]);
+const activeLegalLevel = ref("");
 const settingsDialogPosition = ref({ x: 0, y: 0 });
 const settingsDialogDragging = ref(false);
 const settingsDialogDragStart = ref({ x: 0, y: 0, pointerX: 0, pointerY: 0 });
@@ -68,38 +68,33 @@ const loginForm = ref({
   captcha: "1234"
 });
 
-const treeKeys = computed(() => {
-  const keys: string[] = [];
-  const walk = (nodes: WorkspaceTreeNode[]) => {
-    nodes.forEach((node) => {
-      keys.push(node.key);
-      walk(node.children);
-    });
-  };
-  walk(workspace.tree);
-  return keys;
-});
-
 const businessLevel1Options = computed(() => workspace.getBusinessPathOptions([], 0));
 const businessLevel2Options = computed(() => workspace.getBusinessPathOptions(workspace.editorBusinessPath, 1));
 const businessLevel3Options = computed(() => workspace.getBusinessPathOptions(workspace.editorBusinessPath, 2));
 const legalLevel1Options = computed(() => workspace.getLegalPathOptions([], 0));
 const legalLevel2Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 1));
 const legalLevel3Options = computed(() => workspace.getLegalPathOptions(workspace.editorLegalPath, 2));
-
-function isFolderOpen(key: string) {
-  return openFolders.value.includes(key);
-}
-
-function toggleFolder(key: string) {
-  if (isFolderOpen(key)) {
-    openFolders.value = openFolders.value.filter((item) => item !== key);
-    return;
-  }
-  openFolders.value = [...openFolders.value, key];
-}
+const legalTabs = computed(() => workspace.documentTaxonomy.legalLevels.map((item) => item.name));
+const businessRoots = computed(() => workspace.documentTaxonomy.businessDomains);
+const filteredDocs = computed(() => {
+  const keyword = search.value.trim().toLowerCase();
+  return workspace.docs.filter((doc) => {
+    const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
+    const matchesBusiness =
+      activeBusinessPath.value.length === 0 ||
+      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
+    const matchesKeyword =
+      !keyword ||
+      doc.title.toLowerCase().includes(keyword) ||
+      doc.businessPath.join("/").toLowerCase().includes(keyword) ||
+      doc.legalPath.join("/").toLowerCase().includes(keyword);
+    return matchesLegal && matchesBusiness && matchesKeyword;
+  });
+});
 
 const selectedCount = computed(() => selectedDocumentIds.value.length);
+const activeBusinessSummary = computed(() => activeBusinessPath.value.join(" / ") || "全部业务领域");
+const activeLegalSummary = computed(() => activeLegalLevel.value || "全部效力层级");
 
 function toggleDocumentSelection(doc: WorkspaceDoc) {
   if (selectedDocumentIds.value.includes(doc.id)) {
@@ -111,6 +106,53 @@ function toggleDocumentSelection(doc: WorkspaceDoc) {
 
 function clearSelection() {
   selectedDocumentIds.value = [];
+}
+
+function setLegalLevel(level: string) {
+  activeLegalLevel.value = level;
+}
+
+function selectBusinessPath(path: string[]) {
+  activeBusinessPath.value = path;
+}
+
+function clearBusinessPath() {
+  activeBusinessPath.value = [];
+}
+
+function countDocsForLegal(level: string) {
+  return workspace.docs.filter((doc) => {
+    const matchesLegal = doc.legalPath[0] === level;
+    const matchesBusiness =
+      activeBusinessPath.value.length === 0 ||
+      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
+    return matchesLegal && matchesBusiness;
+  }).length;
+}
+
+function countDocsForBusiness(path: string[]) {
+  return workspace.docs.filter((doc) => {
+    const matchesPath = path.every((segment, index) => doc.businessPath[index] === segment);
+    const matchesLegal = !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
+    return matchesPath && matchesLegal;
+  }).length;
+}
+
+function countDocsForAllLegal() {
+  return workspace.docs.filter((doc) => {
+    return activeBusinessPath.value.length === 0 ||
+      activeBusinessPath.value.every((segment, index) => doc.businessPath[index] === segment);
+  }).length;
+}
+
+function countDocsForAllBusiness() {
+  return workspace.docs.filter((doc) => {
+    return !activeLegalLevel.value || doc.legalPath[0] === activeLegalLevel.value;
+  }).length;
+}
+
+function isBusinessPathActive(path: string[]) {
+  return path.length === activeBusinessPath.value.length && path.every((segment, index) => activeBusinessPath.value[index] === segment);
 }
 
 function withScrollSyncLock(source: "editor" | "preview", callback: () => void) {
@@ -164,7 +206,7 @@ async function login() {
 }
 
 async function saveCurrentDocument() {
-  if (!auth.token) return;
+  if (!auth.token || workspace.activeDocumentLoading) return;
   try {
     await workspace.saveActiveDocument(auth.token);
     statusMessage.value = "源码已保存";
@@ -173,8 +215,13 @@ async function saveCurrentDocument() {
   }
 }
 
+async function saveDocumentAttributes() {
+  await saveCurrentDocument();
+  closeAttributes();
+}
+
 async function normalizeMarkdown() {
-  if (!auth.token) return;
+  if (!auth.token || workspace.activeDocumentLoading) return;
   formatBusy.value = true;
   formatProgress.value = 8;
   formatStageLabel.value = "大模型处理中";
@@ -423,6 +470,18 @@ async function deleteDocument(id: string, title: string) {
   }
 }
 
+async function selectDocument(doc: WorkspaceDoc) {
+  workspace.setActive(doc.id);
+  if (!auth.token || !workspace.usingAdminData) {
+    return;
+  }
+  try {
+    await workspace.loadDocumentDetail(doc.id, auth.token);
+  } catch (error) {
+    statusMessage.value = error instanceof Error ? error.message : "读取文档详情失败";
+  }
+}
+
 async function deleteSelectedDocuments() {
   if (!auth.token || selectedDocumentIds.value.length === 0) return;
   const docs = workspace.docs.filter((doc) => selectedDocumentIds.value.includes(doc.id));
@@ -441,29 +500,6 @@ async function deleteSelectedDocuments() {
   }
 }
 
-async function moveDocumentToPath(doc: WorkspaceDoc, targetPath: string) {
-  if (!auth.token) return;
-  if (doc.archivePath === targetPath || (!doc.archivePath && targetPath === "未归档")) {
-    return;
-  }
-
-  try {
-    await workspace.moveDocument(auth.token, doc.id, targetPath);
-    workspace.setSelectedFolder(targetPath);
-    statusMessage.value = `已移动“${doc.title}”`;
-  } catch (error) {
-    statusMessage.value = error instanceof Error ? error.message : "移动失败";
-  }
-}
-
-watch(
-  treeKeys,
-  (keys) => {
-    openFolders.value = Array.from(new Set([...openFolders.value.filter((item) => keys.includes(item)), ...keys]));
-  },
-  { immediate: true }
-);
-
 watch(
   () => workspace.docs.map((doc) => doc.id),
   (ids) => {
@@ -480,6 +516,19 @@ watch(
     previewFrame.value?.setScrollRatio(0);
     closeAttributes();
   }
+);
+
+watch(
+  filteredDocs,
+  (docs) => {
+    if (docs.length === 0) {
+      return;
+    }
+    if (!docs.some((doc) => doc.id === workspace.activeId)) {
+      void selectDocument(docs[0]);
+    }
+  },
+  { immediate: true }
 );
 
 onMounted(async () => {
@@ -518,15 +567,33 @@ onBeforeUnmount(() => {
       <aside class="file-pane">
         <div class="pane-header">
           <div>
-            <p class="pane-eyebrow">文件</p>
-            <h2>后台工作区</h2>
+            <p class="pane-eyebrow">属性筛选</p>
+            <h2>文档管理</h2>
           </div>
         </div>
 
         <label class="search-box">
           <FaIcon name="magnifying-glass" fixed-width class="search-icon" />
-          <input v-model="search" type="text" placeholder="过滤文件..." />
+          <input v-model="search" type="text" placeholder="搜索标题、业务领域、效力层级..." />
         </label>
+
+        <div class="admin-legal-nav">
+          <button type="button" class="admin-legal-pill" :class="{ active: !activeLegalLevel }" @click="setLegalLevel('')">
+            <span>全部</span>
+            <strong>{{ countDocsForAllLegal() }}</strong>
+          </button>
+          <button
+            v-for="level in legalTabs"
+            :key="level"
+            type="button"
+            class="admin-legal-pill"
+            :class="{ active: activeLegalLevel === level }"
+            @click="setLegalLevel(level)"
+          >
+            <span>{{ level }}</span>
+            <strong>{{ countDocsForLegal(level) }}</strong>
+          </button>
+        </div>
 
         <div class="pane-tools" :class="{ active: workspace.loading || selectedCount > 0 }">
           <div v-if="workspace.loading" class="status">同步中...</div>
@@ -546,22 +613,91 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="folder-tree">
-          <WorkspaceTree
-            :nodes="workspace.tree"
-            :active-id="workspace.activeId"
-            :active-folder-path="workspace.selectedFolderPath"
-            :search="search"
-            :open-keys="openFolders"
-            can-delete
-            :selected-ids="selectedDocumentIds"
-            @toggle="toggleFolder"
-            @select-folder="workspace.setSelectedFolder($event)"
-            @select="workspace.setActive($event.id)"
-            @delete="deleteDocument($event.id, $event.title)"
-            @toggle-select="toggleDocumentSelection"
-            @move="moveDocumentToPath($event.doc, $event.targetPath)"
-          />
+        <div class="folder-tree admin-doc-browser">
+          <div class="admin-business-filter">
+            <button type="button" class="admin-business-all" :class="{ active: activeBusinessPath.length === 0 }" @click="clearBusinessPath">
+              <span>全部业务领域</span>
+              <strong>{{ countDocsForAllBusiness() }}</strong>
+            </button>
+            <div class="admin-business-tree">
+              <template v-for="node in businessRoots" :key="node.name">
+                <button
+                  type="button"
+                  class="admin-business-item"
+                  :class="{ active: isBusinessPathActive([node.name]) }"
+                  @click="selectBusinessPath([node.name])"
+                >
+                  <span>{{ node.name }}</span>
+                  <strong>{{ countDocsForBusiness([node.name]) }}</strong>
+                </button>
+                <button
+                  v-for="child in node.children"
+                  :key="`${node.name}/${child.name}`"
+                  type="button"
+                  class="admin-business-item child"
+                  :class="{ active: isBusinessPathActive([node.name, child.name]) }"
+                  @click="selectBusinessPath([node.name, child.name])"
+                >
+                  <span>{{ child.name }}</span>
+                  <strong>{{ countDocsForBusiness([node.name, child.name]) }}</strong>
+                </button>
+                <button
+                  v-for="child in node.children.flatMap((item) => item.children.map((grandchild) => ({ parent: item.name, name: grandchild.name })))"
+                  :key="`${node.name}/${child.parent}/${child.name}`"
+                  type="button"
+                  class="admin-business-item grandchild"
+                  :class="{ active: isBusinessPathActive([node.name, child.parent, child.name]) }"
+                  @click="selectBusinessPath([node.name, child.parent, child.name])"
+                >
+                  <span>{{ child.name }}</span>
+                  <strong>{{ countDocsForBusiness([node.name, child.parent, child.name]) }}</strong>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <div class="admin-doc-list">
+            <div class="admin-doc-list-header">
+              <span>{{ activeLegalSummary }}</span>
+              <strong>{{ filteredDocs.length }}</strong>
+            </div>
+            <button
+              v-for="doc in filteredDocs"
+              :key="doc.id"
+              type="button"
+              class="admin-doc-item"
+              :class="{ active: workspace.activeId === doc.id }"
+              @click="selectDocument(doc)"
+            >
+              <div class="admin-doc-main">
+                <input
+                  type="checkbox"
+                  class="admin-doc-check"
+                  :checked="selectedDocumentIds.includes(doc.id)"
+                  @click.stop
+                  @change="toggleDocumentSelection(doc)"
+                />
+                <div class="admin-doc-copy">
+                  <strong class="admin-doc-title">{{ doc.title }}</strong>
+                  <div class="admin-doc-meta">
+                    <span class="admin-doc-tag">
+                      <em>业务</em>
+                      <b>{{ doc.businessPath.join(" / ") || "未设置" }}</b>
+                    </span>
+                    <span class="admin-doc-tag">
+                      <em>效力</em>
+                      <b>{{ doc.legalPath.join(" / ") || "未设置" }}</b>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div class="admin-doc-actions">
+                <button type="button" class="subtle-btn admin-doc-action danger" title="删除文档" aria-label="删除文档" @click.stop="deleteDocument(doc.id, doc.title)">
+                  <FaIcon name="trash-can" fixed-width />
+                </button>
+              </div>
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -578,10 +714,11 @@ onBeforeUnmount(() => {
         <template v-if="workspace.activeDocument">
           <article class="editor-body">
             <div class="editor-fields">
-              <label><span>标题</span><input v-model="workspace.editorTitle" /></label>
-              <label
-                ><span>归档路径</span><input v-model="workspace.editorArchivePath" placeholder="如 policy/national/2026"
-              /></label>
+              <label><span>标题</span><input v-model="workspace.editorTitle" :disabled="workspace.activeDocumentLoading" /></label>
+              <label>
+                <span>业务领域 / 效力层级</span>
+                <input :value="`${workspace.editorBusinessPath.join(' / ') || '未设置业务领域'} | ${workspace.editorLegalPath.join(' / ') || '未设置效力层级'}`" disabled />
+              </label>
             </div>
 
             <div class="editor-split">
@@ -591,13 +728,13 @@ onBeforeUnmount(() => {
                     <FaIcon name="code" fixed-width />
                     <span>Markdown 源码</span>
                   </div>
-                  <button type="button" class="subtle-btn convert-btn" :disabled="formatBusy" @click="normalizeMarkdown">
+                  <button type="button" class="subtle-btn convert-btn" :disabled="formatBusy || workspace.activeDocumentLoading" @click="normalizeMarkdown">
                     <FaIcon name="wand-magic-sparkles" fixed-width />
                     <span>{{ formatBusy ? "大模型处理中..." : "一键转换md格式" }}</span>
                   </button>
                 </div>
                 <label class="editor-field">
-                  <textarea ref="markdownTextarea" v-model="workspace.editorMarkdown" @scroll="syncPreviewFromEditor"></textarea>
+                  <textarea ref="markdownTextarea" v-model="workspace.editorMarkdown" :disabled="workspace.activeDocumentLoading" @scroll="syncPreviewFromEditor"></textarea>
                 </label>
               </section>
 
@@ -607,7 +744,11 @@ onBeforeUnmount(() => {
                   <span>HTML 预览</span>
                 </div>
                 <div class="preview-surface">
-                  <GovDocPreview
+                  <div v-if="workspace.activeDocumentLoading" class="document-loading-state">
+                    <FaIcon name="spinner" fixed-width class="spin" />
+                    <span>正在加载文档详情...</span>
+                  </div>
+                  <AdminDocPreview
                     ref="previewFrame"
                     :source="workspace.editorMarkdown"
                     :persisted-html="workspace.activeDocument.previewHtml"
@@ -639,11 +780,11 @@ onBeforeUnmount(() => {
                   <FaIcon name="sitemap" fixed-width />
                   <span>属性体系</span>
                 </button>
-                <button class="save-btn secondary-btn" type="button" @click="openAttributes">
+                <button class="save-btn secondary-btn" type="button" :disabled="workspace.activeDocumentLoading" @click="openAttributes">
                   <FaIcon name="tags" fixed-width />
                   <span>文档属性</span>
                 </button>
-                <button class="save-btn" @click="saveCurrentDocument" :disabled="workspace.saving">
+                <button class="save-btn" @click="saveCurrentDocument" :disabled="workspace.saving || workspace.activeDocumentLoading">
                   <FaIcon name="floppy-disk" fixed-width />
                   <span>{{ workspace.saving ? "保存中..." : "保存源码" }}</span>
                 </button>
@@ -722,6 +863,10 @@ onBeforeUnmount(() => {
         <footer class="settings-actions">
           <p class="attribute-summary">{{ workspace.editorBusinessPath.join(" / ") || "未设置业务领域" }}<br />{{ workspace.editorLegalPath.join(" / ") || "未设置效力层级" }}</p>
           <div class="settings-submit">
+            <button type="button" class="save-btn" :disabled="workspace.saving" @click="saveDocumentAttributes">
+              <FaIcon name="floppy-disk" fixed-width />
+              <span>{{ workspace.saving ? "保存中..." : "保存属性" }}</span>
+            </button>
             <button type="button" class="save-btn secondary-btn" @click="closeAttributes">完成</button>
           </div>
         </footer>
@@ -970,7 +1115,7 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 92%, #000 8%), var(--panel-bg));
   padding: 14px 12px;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   gap: 8px;
   height: 100%;
   min-height: 0;
@@ -1035,6 +1180,30 @@ textarea {
   resize: none;
   line-height: 1.7;
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(109, 123, 145, 0.72) rgba(198, 206, 218, 0.35);
+}
+
+textarea::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+textarea::-webkit-scrollbar-track {
+  background: rgba(198, 206, 218, 0.35);
+  border-radius: 999px;
+}
+
+textarea::-webkit-scrollbar-thumb {
+  background: rgba(109, 123, 145, 0.72);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(86, 100, 123, 0.88);
+  background-clip: padding-box;
 }
 
 .search-box {
@@ -1077,6 +1246,243 @@ textarea {
   min-height: 0;
   padding-top: 4px;
   padding-right: 2px;
+}
+
+.admin-legal-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-legal-pill,
+.admin-business-all,
+.admin-business-item,
+.admin-doc-item {
+  font: inherit;
+}
+
+.admin-legal-pill {
+  border: 1px solid var(--input-border);
+  background: var(--panel-muted-bg);
+  color: var(--text-secondary);
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.admin-legal-pill strong {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: var(--panel-header-bg);
+  font-size: 10px;
+}
+
+.admin-legal-pill.active,
+.admin-business-all.active,
+.admin-business-item.active,
+.admin-doc-item.active {
+  background: var(--nav-active-bg);
+  border-color: var(--nav-active-border);
+  color: var(--text-primary);
+}
+
+.admin-doc-browser {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-business-filter,
+.admin-doc-list {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-business-all {
+  border: 1px solid var(--input-border);
+  background: var(--panel-muted-bg);
+  color: var(--text-primary);
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.admin-business-tree {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-business-item {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.admin-business-item.child {
+  padding-left: 18px;
+}
+
+.admin-business-item.grandchild {
+  padding-left: 30px;
+}
+
+.admin-doc-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.admin-doc-list {
+  min-height: 0;
+}
+
+.admin-doc-item {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--input-border) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+  color: inherit;
+  min-height: 58px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  align-items: stretch;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.03);
+}
+
+.admin-doc-item:hover {
+  border-color: color-mix(in srgb, var(--nav-active-border) 48%, var(--input-border) 52%);
+  background: color-mix(in srgb, var(--panel-bg) 76%, var(--hover-bg) 24%);
+}
+
+.admin-doc-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.admin-doc-check {
+  width: 14px;
+  height: 14px;
+  margin-top: 0;
+}
+
+.admin-doc-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  align-self: center;
+}
+
+.admin-doc-copy strong,
+.admin-doc-tag {
+  margin: 0;
+  min-width: 0;
+}
+
+.admin-doc-title {
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text-primary);
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  letter-spacing: 0.01em;
+}
+
+.admin-doc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 5px;
+}
+
+.admin-doc-tag {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--input-border) 64%, transparent);
+  background: color-mix(in srgb, var(--panel-header-bg) 48%, transparent);
+  color: var(--text-muted);
+  font-size: 8.5px;
+  line-height: 1.2;
+}
+
+.admin-doc-tag em {
+  font-style: normal;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.admin-doc-tag b {
+  font-weight: 500;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-doc-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: stretch;
+  padding-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--input-border) 55%, transparent);
+}
+
+.admin-doc-action {
+  min-height: 100%;
+  width: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-end;
+}
+
+.admin-doc-action.danger {
+  color: var(--text-muted);
+}
+
+.admin-doc-action.danger:hover {
+  color: #c56161;
 }
 
 .pane-tools {
@@ -1246,13 +1652,33 @@ textarea {
 }
 
 .preview-surface {
+  position: relative;
   flex: 1 1 auto;
   height: 100%;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   border-radius: 8px;
   background: var(--panel-muted-bg);
   padding: 14px 16px 18px;
+}
+
+.document-loading-state {
+  position: absolute;
+  inset: 14px 16px 18px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg) 82%, transparent);
+  color: var(--text-muted);
+  font-size: 12px;
+  backdrop-filter: blur(4px);
+}
+
+.spin {
+  animation: admin-spin 0.9s linear infinite;
 }
 
 .editor-footer {
@@ -1356,6 +1782,16 @@ textarea {
 .save-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+@keyframes admin-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .settings-backdrop {
@@ -1757,6 +2193,28 @@ textarea {
 @media (max-width: 1024px) {
   .workspace {
     grid-template-columns: 1fr;
+  }
+
+  .admin-doc-item {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .admin-doc-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .admin-doc-action {
+    min-height: 30px;
+    width: 28px;
+    padding: 4px 0;
+    border: 1px solid color-mix(in srgb, var(--input-border) 72%, transparent);
+    background: color-mix(in srgb, var(--panel-header-bg) 66%, transparent);
+    justify-content: center;
+    align-items: center;
   }
 
   .tree-actions {

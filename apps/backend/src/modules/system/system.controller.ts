@@ -23,6 +23,12 @@ export class SystemController {
     return this.systemService.getPublicWelcomeDocument(req);
   }
 
+  @Public()
+  @Get("document-taxonomy")
+  getPublicDocumentTaxonomy() {
+    return this.systemService.getPublicDocumentTaxonomy();
+  }
+
   @Roles("admin")
   @Get("admin/welcome-document")
   getAdminWelcomeDocument(@Req() req: AuthRequest) {

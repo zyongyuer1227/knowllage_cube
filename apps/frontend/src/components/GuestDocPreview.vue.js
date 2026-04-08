@@ -6,11 +6,8 @@ import kaiTiUrl from "../../../../static/fonts/KaiTi.ttf?url";
 import simHeiUrl from "../../../../static/fonts/SimHei.ttf?url";
 import xiaoBiaoSongUrl from "../../../../static/fonts/FZXBSJW.TTF?url";
 const props = defineProps();
-const emit = defineEmits();
 const frame = ref(null);
-const frameHeight = ref(720);
-let frameScrollTicking = false;
-let pendingScrollRatio = 0;
+const frameHeight = ref(0);
 marked.setOptions({
     breaks: true,
     gfm: true
@@ -67,13 +64,21 @@ function normalizePreviewMarkup(html) {
         .replace(/<blockquote>\s*<p>/g, '<blockquote class="doc-quote"><p class="doc-quote-line">')
         .replace(/<\/p>\s*<\/blockquote>/g, "</p></blockquote>");
 }
+function ensureGuestHtml(html) {
+    if (!html.trim()) {
+        return "";
+    }
+    return html
+        .replace(/<html([^>]*)>/i, '<html$1 style="background:#eef1f4;overflow:hidden;">')
+        .replace(/<body([^>]*)>/i, '<body$1 style="box-sizing:border-box;min-height:auto;padding:24px 32px 40px;overflow:visible;">');
+}
 const srcdoc = computed(() => {
     if ((props.persistedHtml ?? "").trim()) {
-        return props.persistedHtml ?? "";
+        return ensureGuestHtml(props.persistedHtml ?? "");
     }
     const rendered = normalizePreviewMarkup(normalizeImageMarkup(marked.parse(preprocessMarkdownSource(props.source ?? ""))));
     return `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" style="background:#eef1f4;overflow:hidden;">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -84,39 +89,11 @@ ${fontCss}
 ${govDocCss}
     </style>
     <style>
-      html {
-        background: #eef1f4;
-        overflow-y: auto;
-        scrollbar-width: thin;
-        scrollbar-color: rgba(109, 123, 145, 0.72) rgba(198, 206, 218, 0.35);
-      }
-
       body {
         box-sizing: border-box;
         min-height: auto;
         padding: 24px 32px 40px;
         overflow: visible;
-      }
-
-      html::-webkit-scrollbar {
-        width: 10px;
-      }
-
-      html::-webkit-scrollbar-track {
-        background: rgba(198, 206, 218, 0.35);
-        border-radius: 999px;
-      }
-
-      html::-webkit-scrollbar-thumb {
-        background: rgba(109, 123, 145, 0.72);
-        border-radius: 999px;
-        border: 2px solid transparent;
-        background-clip: padding-box;
-      }
-
-      html::-webkit-scrollbar-thumb:hover {
-        background: rgba(86, 100, 123, 0.88);
-        background-clip: padding-box;
       }
 
       img {
@@ -146,74 +123,32 @@ ${rendered}
   </body>
 </html>`;
 });
-function getFrameScrollRoot() {
-    return frame.value?.contentDocument?.scrollingElement;
-}
-function getScrollRatio() {
-    const scrollRoot = getFrameScrollRoot();
-    if (!scrollRoot)
-        return 0;
-    const maxScrollTop = scrollRoot.scrollHeight - scrollRoot.clientHeight;
-    if (maxScrollTop <= 0)
-        return 0;
-    return scrollRoot.scrollTop / maxScrollTop;
-}
-function setScrollRatio(value) {
-    pendingScrollRatio = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-    const scrollRoot = getFrameScrollRoot();
-    if (!scrollRoot)
-        return;
-    const maxScrollTop = scrollRoot.scrollHeight - scrollRoot.clientHeight;
-    scrollRoot.scrollTop = maxScrollTop > 0 ? maxScrollTop * pendingScrollRatio : 0;
-}
-function handleFrameScroll() {
-    if (frameScrollTicking)
-        return;
-    frameScrollTicking = true;
+function syncFrameHeight() {
     requestAnimationFrame(() => {
-        frameScrollTicking = false;
-        emit("scroll-ratio", getScrollRatio());
+        const doc = frame.value?.contentDocument;
+        const scrollRoot = doc?.scrollingElement;
+        const body = doc?.body;
+        const nextHeight = Math.max(scrollRoot?.scrollHeight ?? 0, scrollRoot?.offsetHeight ?? 0, body?.scrollHeight ?? 0, body?.offsetHeight ?? 0);
+        frameHeight.value = Math.max(nextHeight, 1);
     });
 }
 function handleLoad() {
-    const frameWindow = frame.value?.contentWindow;
-    frameWindow?.removeEventListener("scroll", handleFrameScroll);
-    frameWindow?.addEventListener("scroll", handleFrameScroll, { passive: true });
     syncFrameHeight();
-    setScrollRatio(pendingScrollRatio);
 }
-function syncFrameHeight() {
-    if (!props.autoHeight) {
-        return;
-    }
-    requestAnimationFrame(() => {
-        const scrollRoot = getFrameScrollRoot();
-        if (!scrollRoot)
-            return;
-        frameHeight.value = Math.max(scrollRoot.scrollHeight, 720);
-    });
-}
-const __VLS_exposed = {
-    setScrollRatio,
-    syncFrameHeight
-};
-defineExpose(__VLS_exposed);
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
 let __VLS_components;
 let __VLS_directives;
-/** @type {__VLS_StyleScopedClasses['gov-doc-preview']} */ ;
 // CSS variable injection 
 // CSS variable injection end 
 __VLS_asFunctionalElement(__VLS_intrinsicElements.iframe, __VLS_intrinsicElements.iframe)({
     ...{ onLoad: (__VLS_ctx.handleLoad) },
     ref: "frame",
     ...{ class: "gov-doc-preview" },
-    ...{ class: ({ 'auto-height': __VLS_ctx.autoHeight }) },
-    ...{ style: (__VLS_ctx.autoHeight ? { height: `${__VLS_ctx.frameHeight}px` } : undefined) },
+    ...{ style: ({ height: `${__VLS_ctx.frameHeight}px` }) },
     srcdoc: (__VLS_ctx.srcdoc),
     title: "公文 HTML 预览",
-    scrolling: (__VLS_ctx.autoHeight ? 'no' : 'auto'),
+    scrolling: "no",
 });
 /** @type {typeof __VLS_ctx.frame} */ ;
 /** @type {__VLS_StyleScopedClasses['gov-doc-preview']} */ ;
@@ -227,16 +162,12 @@ const __VLS_self = (await import('vue')).defineComponent({
             handleLoad: handleLoad,
         };
     },
-    __typeEmits: {},
     __typeProps: {},
 });
 export default (await import('vue')).defineComponent({
     setup() {
-        return {
-            ...__VLS_exposed,
-        };
+        return {};
     },
-    __typeEmits: {},
     __typeProps: {},
 });
 ; /* PartiallyEnd: #4569/main.vue */

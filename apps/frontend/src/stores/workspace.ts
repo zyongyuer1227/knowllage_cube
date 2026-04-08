@@ -13,7 +13,7 @@ export type WorkspaceDoc = {
   archivePath: string;
   businessPath: string[];
   legalPath: string[];
-  markdownSource: string;
+  markdownSource?: string;
   rawText?: string;
   previewHtml?: string;
   updatedAt?: string;
@@ -128,11 +128,13 @@ function ensureFolderPathSet(paths: Set<string>, path: string) {
 export const useWorkspaceStore = defineStore("workspace", () => {
   const docs = ref<WorkspaceDoc[]>([]);
   const folders = ref<WorkspaceFolder[]>([]);
+  const docDetails = ref<Record<string, WorkspaceDoc>>({});
   const activeId = ref("");
   const mode = ref<WorkspaceMode>("public");
   const defaultDocument = ref<WorkspaceDoc>(getDefaultDocument());
   const hasUserSelectedDocument = ref(false);
   const loading = ref(false);
+  const activeDocumentLoading = ref(false);
   const saving = ref(false);
   const initialized = ref(false);
   const usingAdminData = ref(false);
@@ -149,7 +151,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (!hasUserSelectedDocument.value) {
       return defaultDocument.value;
     }
-    return docs.value.find((doc) => doc.id === activeId.value) ?? docs.value[0] ?? defaultDocument.value;
+    return docDetails.value[activeId.value] ?? docs.value.find((doc) => doc.id === activeId.value) ?? docs.value[0] ?? defaultDocument.value;
   });
   const tree = computed<WorkspaceTreeNode[]>(() => {
     const folderPathSet = new Set<string>();
@@ -215,7 +217,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     editorArchivePath.value = activeDocument.value.archivePath;
     editorBusinessPath.value = [...activeDocument.value.businessPath];
     editorLegalPath.value = [...activeDocument.value.legalPath];
-    editorMarkdown.value = activeDocument.value.markdownSource;
+    editorMarkdown.value = activeDocument.value.markdownSource ?? "";
     selectedFolderPath.value = getTreePath(activeDocument.value.archivePath);
   }
 
@@ -223,6 +225,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     if (initialized.value) return;
     docs.value = [];
     folders.value = [];
+    docDetails.value = {};
     activeId.value = "";
     hasUserSelectedDocument.value = false;
     defaultDocument.value = getDefaultDocument();
@@ -235,6 +238,51 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     activeId.value = id;
     hasUserSelectedDocument.value = true;
     syncEditorFromActive();
+  }
+
+  function normalizeWorkspaceDoc(
+    doc: Record<string, unknown>,
+    fallback: Partial<WorkspaceDoc> = {}
+  ): WorkspaceDoc {
+    return {
+      id: String(doc.id ?? fallback.id ?? ""),
+      title: String(doc.title ?? fallback.title ?? ""),
+      archivePath: String(doc.archivePath ?? fallback.archivePath ?? ""),
+      businessPath: Array.isArray(doc.businessPath)
+        ? (doc.businessPath as unknown[]).map((value) => String(value))
+        : fallback.businessPath ?? [doc.businessDomain, doc.businessSubdomain]
+            .filter((value): value is string => Boolean(value))
+            .map(String),
+      legalPath: Array.isArray(doc.legalPath)
+        ? (doc.legalPath as unknown[]).map((value) => String(value))
+        : fallback.legalPath ?? [doc.legalLevel].filter((value): value is string => Boolean(value)).map(String),
+      markdownSource: doc.markdownContent !== undefined ? String(doc.markdownContent ?? "") : fallback.markdownSource,
+      rawText: doc.rawText ? String(doc.rawText) : fallback.rawText,
+      previewHtml: doc.previewHtml ? String(doc.previewHtml) : fallback.previewHtml,
+      updatedAt: String(doc.updatedAt ?? fallback.updatedAt ?? "")
+    };
+  }
+
+  async function loadDocumentDetail(id: string, token?: string) {
+    if (docDetails.value[id]) {
+      return docDetails.value[id];
+    }
+    const fallback = docs.value.find((doc) => doc.id === id);
+    activeDocumentLoading.value = true;
+    try {
+      const detail = token ? await api.getDocument(id, token) : await api.publicDocument(id);
+      const normalized = normalizeWorkspaceDoc(detail, fallback);
+      docDetails.value = {
+        ...docDetails.value,
+        [id]: normalized
+      };
+      if (activeId.value === id) {
+        syncEditorFromActive();
+      }
+      return normalized;
+    } finally {
+      activeDocumentLoading.value = false;
+    }
   }
 
   function setSelectedFolder(path: string) {
@@ -286,7 +334,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     mode.value = "public";
     loading.value = true;
     try {
-      const [searchResult, folderResult, welcome] = await Promise.all([
+      const [searchResult, folderResult, welcome, taxonomy] = await Promise.all([
         api.publicSearch({
           page: 1,
           pageSize: 100,
@@ -294,31 +342,19 @@ export const useWorkspaceStore = defineStore("workspace", () => {
           order: "desc"
         }),
         api.publicFolders(),
-        api.getPublicWelcomeDocument()
+        api.getPublicWelcomeDocument(),
+        api.getPublicDocumentTaxonomy()
       ]);
 
-      const details = await Promise.all(
-        searchResult.items.map(async (item) => {
-          const doc = await api.publicDocument(String(item.id));
-          return {
-            id: String(doc.id),
-            title: String(doc.title ?? ""),
-            archivePath: String(doc.archivePath ?? item.archivePath ?? ""),
-            businessPath: Array.isArray(doc.businessPath)
-              ? (doc.businessPath as unknown[]).map((value) => String(value))
-              : [doc.businessDomain, doc.businessSubdomain].filter((value): value is string => Boolean(value)).map(String),
-            legalPath: Array.isArray(doc.legalPath)
-              ? (doc.legalPath as unknown[]).map((value) => String(value))
-              : [doc.legalLevel].filter((value): value is string => Boolean(value)).map(String),
-            markdownSource: String(doc.markdownContent ?? ""),
-            rawText: doc.rawText ? String(doc.rawText) : undefined,
-            previewHtml: doc.previewHtml ? String(doc.previewHtml) : undefined,
-            updatedAt: String(doc.updatedAt ?? item.updatedAt ?? "")
-          } satisfies WorkspaceDoc;
-        })
-      );
+      const summaries = searchResult.items.map((item) => normalizeWorkspaceDoc(item, {
+        id: String(item.id ?? ""),
+        title: String(item.title ?? ""),
+        archivePath: String(item.archivePath ?? ""),
+        updatedAt: String(item.updatedAt ?? "")
+      }));
 
-      docs.value = details;
+      docs.value = summaries;
+      docDetails.value = {};
       defaultDocument.value = {
         id: "welcome",
         title: String(welcome.title ?? "欢迎.md"),
@@ -334,11 +370,15 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         fullPath: String(item.fullPath),
         parentPath: item.parentPath ? String(item.parentPath) : null
       }));
-      if (!details.some((doc) => doc.id === activeId.value)) {
+      documentTaxonomy.value = taxonomy;
+      if (!summaries.some((doc) => doc.id === activeId.value)) {
         activeId.value = "";
         hasUserSelectedDocument.value = false;
       }
       syncEditorFromActive();
+      if (hasUserSelectedDocument.value && activeId.value) {
+        await loadDocumentDetail(activeId.value);
+      }
       usingAdminData.value = false;
     } finally {
       loading.value = false;
@@ -362,28 +402,15 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         api.getAdminDocumentTaxonomy(token)
       ]);
 
-      const details = await Promise.all(
-        searchResult.items.map(async (item) => {
-          const doc = await api.getDocument(String(item.id), token);
-          return {
-            id: String(doc.id),
-            title: String(doc.title ?? ""),
-            archivePath: String(doc.archivePath ?? ""),
-            businessPath: Array.isArray(doc.businessPath)
-              ? (doc.businessPath as unknown[]).map((value) => String(value))
-              : [doc.businessDomain, doc.businessSubdomain].filter((value): value is string => Boolean(value)).map(String),
-            legalPath: Array.isArray(doc.legalPath)
-              ? (doc.legalPath as unknown[]).map((value) => String(value))
-              : [doc.legalLevel].filter((value): value is string => Boolean(value)).map(String),
-            markdownSource: String(doc.markdownContent ?? ""),
-            rawText: doc.rawText ? String(doc.rawText) : undefined,
-            previewHtml: doc.previewHtml ? String(doc.previewHtml) : undefined,
-            updatedAt: String(doc.updatedAt ?? "")
-          } satisfies WorkspaceDoc;
-        })
-      );
+      const summaries = searchResult.items.map((item) => normalizeWorkspaceDoc(item, {
+        id: String(item.id ?? ""),
+        title: String(item.title ?? ""),
+        archivePath: String(item.archivePath ?? ""),
+        updatedAt: String(item.updatedAt ?? "")
+      }));
 
-      docs.value = details;
+      docs.value = summaries;
+      docDetails.value = {};
       defaultDocument.value = {
         id: "welcome",
         title: String(welcome.title ?? "欢迎.md"),
@@ -400,11 +427,14 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         parentPath: item.parentPath ? String(item.parentPath) : null
       }));
       documentTaxonomy.value = taxonomy;
-      if (!details.some((doc) => doc.id === activeId.value)) {
+      if (!summaries.some((doc) => doc.id === activeId.value)) {
         activeId.value = "";
         hasUserSelectedDocument.value = false;
       }
       syncEditorFromActive();
+      if (hasUserSelectedDocument.value && activeId.value) {
+        await loadDocumentDetail(activeId.value, token);
+      }
       usingAdminData.value = true;
     } finally {
       loading.value = false;
@@ -428,7 +458,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const result = await api.uploadDocument(formData, token);
     await loadAdminWorkspace(token);
     if (result.documentId) {
-      setActive(String(result.documentId));
+      const documentId = String(result.documentId);
+      setActive(documentId);
+      await loadDocumentDetail(documentId, token);
     }
   }
 
@@ -535,6 +567,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const latestCompleted = completed[completed.length - 1];
     if (latestCompleted) {
       setActive(latestCompleted.documentId);
+      await loadDocumentDetail(latestCompleted.documentId, token);
     }
 
     return {
@@ -582,8 +615,9 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     }
     saving.value = true;
     try {
+      const documentId = activeDocument.value.id;
       await api.updateDocument(
-        activeDocument.value.id,
+        documentId,
         {
           title: editorTitle.value,
           archivePath: editorArchivePath.value,
@@ -593,7 +627,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         token
       );
       await api.updateDocumentContent(
-        activeDocument.value.id,
+        documentId,
         {
           markdownContent: editorMarkdown.value,
           changeNote: "Admin workspace editor update"
@@ -601,7 +635,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
         token
       );
       await loadAdminWorkspace(token);
-      setActive(activeDocument.value.id);
+      setActive(documentId);
     } finally {
       saving.value = false;
     }
@@ -663,6 +697,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       });
       await loadAdminWorkspace(token);
       setActive(documentId);
+      await loadDocumentDetail(documentId, token);
       return documentId;
     }
 
@@ -701,6 +736,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   return {
     activeDocument,
+    activeDocumentLoading,
     activeId,
     createDocument,
     createFolder,
@@ -719,6 +755,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     legalLevelOptions,
     mode,
     loadAdminWorkspace,
+    loadDocumentDetail,
     loadPublicWorkspace,
     loading,
     moveDocument,

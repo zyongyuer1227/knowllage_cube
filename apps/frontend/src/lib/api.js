@@ -57,6 +57,9 @@ export const api = {
     publicFolders() {
         return request("/public/search/folders");
     },
+    getPublicDocumentTaxonomy() {
+        return request("/system/document-taxonomy");
+    },
     getPublicWelcomeDocument() {
         return request("/system/welcome-document");
     },

@@ -10,13 +10,13 @@ import xiaoBiaoSongUrl from "../../../../static/fonts/FZXBSJW.TTF?url";
 const props = defineProps<{
   source: string;
   persistedHtml?: string;
-  autoHeight?: boolean;
 }>();
+
 const emit = defineEmits<{
   (e: "scroll-ratio", value: number): void;
 }>();
+
 const frame = ref<HTMLIFrameElement | null>(null);
-const frameHeight = ref(720);
 let frameScrollTicking = false;
 let pendingScrollRatio = 0;
 
@@ -199,24 +199,11 @@ function handleLoad() {
   const frameWindow = frame.value?.contentWindow;
   frameWindow?.removeEventListener("scroll", handleFrameScroll);
   frameWindow?.addEventListener("scroll", handleFrameScroll, { passive: true });
-  syncFrameHeight();
   setScrollRatio(pendingScrollRatio);
 }
 
-function syncFrameHeight() {
-  if (!props.autoHeight) {
-    return;
-  }
-  requestAnimationFrame(() => {
-    const scrollRoot = getFrameScrollRoot();
-    if (!scrollRoot) return;
-    frameHeight.value = Math.max(scrollRoot.scrollHeight, 720);
-  });
-}
-
 defineExpose({
-  setScrollRatio,
-  syncFrameHeight
+  setScrollRatio
 });
 </script>
 
@@ -224,11 +211,9 @@ defineExpose({
   <iframe
     ref="frame"
     class="gov-doc-preview"
-    :class="{ 'auto-height': autoHeight }"
-    :style="autoHeight ? { height: `${frameHeight}px` } : undefined"
     :srcdoc="srcdoc"
     title="公文 HTML 预览"
-    :scrolling="autoHeight ? 'no' : 'auto'"
+    scrolling="auto"
     @load="handleLoad"
   ></iframe>
 </template>
@@ -241,10 +226,5 @@ defineExpose({
   border: 0;
   border-radius: 0;
   background: #eef1f4;
-}
-
-.gov-doc-preview.auto-height {
-  min-height: 720px;
-  height: auto;
 }
 </style>

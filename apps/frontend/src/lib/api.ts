@@ -114,6 +114,9 @@ export const api = {
   publicFolders() {
     return request<{ total: number; items: Array<Record<string, unknown>> }>("/public/search/folders");
   },
+  getPublicDocumentTaxonomy() {
+    return request<DocumentTaxonomyConfig>("/system/document-taxonomy");
+  },
   getPublicWelcomeDocument() {
     return request<WelcomeDocumentPayload>("/system/welcome-document");
   },

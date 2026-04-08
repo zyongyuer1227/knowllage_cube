@@ -265,10 +265,6 @@ async function submitAction() {
               <FaIcon name="file-circle-plus" fixed-width />
               <span>新增文档</span>
             </button>
-            <button class="topbar-btn" type="button" :disabled="actionBusy" @click="openAction('folder')">
-              <FaIcon name="folder-plus" fixed-width />
-              <span>新增文件夹</span>
-            </button>
             <input
               ref="importInput"
               type="file"
